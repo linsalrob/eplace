@@ -355,6 +355,7 @@ def process_blast_results_for_taxonomy(
         blast_hits: list of BlastHit objects
         output_dir: Output directory for FASTA files
         rank: Taxonomic rank for representative selection
+        group_rank: Taxonomic rank used for grouping sequences across samples
         database: Name of BLAST database
         blastdb_path: Path to BLAST database directory
         
