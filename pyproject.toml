@@ -24,6 +24,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
+dependencies = [
+    "py-fasta-validator>=0.6",
+]
 
 [project.optional-dependencies]
 dev = [

@@ -21,6 +21,8 @@ from eplace_lib.blast_analysis import run_blast_search, FastaReader
 from eplace_lib.taxonomy import process_blast_results_for_taxonomy, rewrite_blast_hits, generate_classification_summary
 from eplace_lib.alignment import process_query_alignment_and_tree, process_query_alignment_and_tree_parallel, IQTreeBuilder
 
+import FastaValidator
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -168,6 +170,19 @@ Notes:
     if not args.query_fasta.exists():
         logger.error(f"Query FASTA file not found: {args.query_fasta}")
         sys.exit(1)
+
+    # Validate FASTA format
+    fasta_return_code = FastaValidator.fasta_validator(str(args.query_fasta))
+    if fasta_return_code != 0:
+        fasta_errors = {
+            1: "the first line does not start with '>' (not a valid FASTA file)",
+            2: "duplicate sequence identifiers found in the FASTA file",
+            4: "invalid characters found in sequence lines (only [A-Za-z] are allowed)",
+        }
+        error_msg = fasta_errors.get(fasta_return_code, f"unknown validation error (code {fasta_return_code})")
+        logger.error(f"FASTA validation failed for {args.query_fasta}: {error_msg}")
+        sys.exit(1)
+    logger.info(f"FASTA validation passed for {args.query_fasta}")
     
     # Create output directory
     args.output_dir.mkdir(parents=True, exist_ok=True)

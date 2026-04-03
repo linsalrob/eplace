@@ -1,1 +1,2 @@
 pytaxonkit
+py-fasta-validator>=0.6
