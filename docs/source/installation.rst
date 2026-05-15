@@ -204,6 +204,8 @@ or ``~/mmseqs2db``.
 
 .. warning::
    Search databases are large. Ensure you have sufficient disk space and bandwidth before downloading.
+   Plan for hundreds of GB of free disk space for BLAST core_nt and similarly
+   large storage requirements for MMseqs2 NT builds.
    MMseqs2 NT download typically requires at least 64 GiB RAM, and MMseqs2 taxonomy integration
    typically requires at least 128 GiB RAM. Downloads may take a significant amount of time depending
    on your internet connection.

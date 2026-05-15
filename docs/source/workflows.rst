@@ -331,7 +331,8 @@ Configure search database usage:
 
   * Options: ``blast``, ``mmseqs2``
   * Applies to individual and grouped workflows
-  * Choose MMseqs2 for alternate search backend behavior
+  * Choose MMseqs2 when you already maintain MMseqs2 databases or want to
+    align your workflow with MMseqs2-based pipelines
 
 * ``--mmseqs-database``: MMseqs2 database name
 

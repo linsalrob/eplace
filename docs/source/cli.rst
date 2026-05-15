@@ -216,6 +216,8 @@ Search Backend Options
    MMseqs2 sensitivity (range 1 to 7.5).
    Lower values are faster but less sensitive; higher values are slower but
    more thorough.
+   Typical tuning: use around ``3-4`` for faster exploratory runs, and
+   ``6-7`` when you need more comprehensive hit recovery.
    Only used with ``--search-tool mmseqs2``.
 
    Default: ``5.7``
@@ -416,6 +418,8 @@ Search Backend Options
    MMseqs2 sensitivity (range 1 to 7.5).
    Lower values are faster but less sensitive; higher values are slower but
    more thorough.
+   Typical tuning: use around ``3-4`` for faster exploratory runs, and
+   ``6-7`` when you need more comprehensive hit recovery.
    Only used with ``--search-tool mmseqs2``.
 
    Default: ``5.7``
