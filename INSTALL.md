@@ -39,20 +39,32 @@ eplace --version
 
 ## Usage
 
-Once installed, you can use the `eplace` command with three subcommands:
+Once installed, you can use the `eplace` command with four subcommands:
 
-- `eplace download` - Download NCBI BLAST database
-- `eplace search` - Run individual search workflow (one tree per query)
-- `eplace grouped` - Run grouped BLAST workflow (one tree per taxonomic group)
+- `eplace download` - Download BLAST and/or MMseqs2 search databases
+- `eplace search` - Run individual search workflow (one tree per query; BLAST or MMseqs2)
+- `eplace grouped` - Run grouped search workflow (one tree per taxonomic group; BLAST or MMseqs2)
+- `eplace relabel` - Relabel an existing tree with taxonomic names
 
 For detailed help on each command:
 ```bash
 eplace download --help
 eplace search --help
 eplace grouped --help
+eplace relabel --help
+```
+
+Common download examples:
+```bash
+# BLAST core_nt only (default)
+eplace download
+
+# MMseqs2 NT only
+eplace download --target mmseqs2
+
+# MMseqs2 NT with taxonomy sidecars
+eplace download --target mmseqs2 --add-taxonomy --ncbi-taxonomy /path/to/ncbi/taxonomy/current
 ```
 
 See the [README.md](README.md) for complete documentation and examples.
-
-
 

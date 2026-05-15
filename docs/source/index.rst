@@ -20,9 +20,9 @@ Overview
 
 ePLACE provides a comprehensive toolkit for environmental DNA analysis with the following capabilities:
 
-* **NCBI Database Management**: Download and manage NCBI BLAST databases (core_nt)
+* **NCBI Database Management**: Download and manage BLAST core_nt and MMseqs2 NT databases
 * **FASTA File Processing**: Read and validate FASTA files
-* **BLAST Search**: Run blastn searches with configurable parameters
+* **Sequence Search**: Run BLAST or MMseqs2 searches with configurable parameters
 * **Result Filtering**: Filter BLAST results by identity and coverage thresholds
 * **Taxonomic Analysis**: Extract representative sequences per taxonomic rank
 * **Sequence Extraction**: Retrieve sequences from BLAST databases
@@ -40,7 +40,7 @@ Installation
 
 .. code-block:: bash
    # create and activate a mamba environment
-   mamba create -yn eplace bioconda::blast bioconda::pytaxonkit bioconda::iqtree bioconda::mafft
+   mamba create -yn eplace bioconda::blast bioconda::mmseqs2 bioconda::pytaxonkit bioconda::iqtree bioconda::mafft
    mamba activate eplace
 
    # Clone the repository
@@ -58,8 +58,11 @@ Basic Usage
 
 .. code-block:: bash
 
-   # Download NCBI database
+   # Download NCBI BLAST core_nt database
    eplace download
+
+   # Download MMseqs2 NT database
+   eplace download --target mmseqs2
 
    # Run search analysis (BLAST by default)
    eplace search query.fasta output_dir

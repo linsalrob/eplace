@@ -26,7 +26,7 @@ Commands Overview
    * - Command
      - Description
    * - ``eplace download``
-     - Download NCBI BLAST database
+     - Download BLAST and/or MMseqs2 search databases
    * - ``eplace search``
      - Run individual search workflow (one tree per query; BLAST by default, MMseqs2 via ``--search-tool``)
    * - ``eplace grouped``
@@ -115,7 +115,7 @@ Notes
 eplace search
 ------------
 
-Run BLAST search with individual taxonomy analysis. Creates one phylogenetic tree per query sequence.
+Run sequence search with individual taxonomy analysis. Creates one phylogenetic tree per query sequence.
 
 Usage
 ~~~~~
@@ -181,6 +181,52 @@ Database Options
 
    Path to BLAST database directory
 
+Search Backend Options
+^^^^^^^^^^^^^^^^^^^^^^
+
+.. option:: --search-tool {blast,mmseqs2}
+
+   Sequence search tool to use
+
+   Default: ``blast``
+
+.. option:: --blast-db-source LABEL
+
+   Provenance label written to ``search_metadata.json`` for reproducibility.
+   If not provided, this defaults to ``--database``.
+
+.. option:: --mmseqs-database NAME
+
+   MMseqs2 database name. Defaults to ``--database`` when omitted.
+   Only used with ``--search-tool mmseqs2``.
+
+.. option:: --mmseqs-db-path PATH
+
+   Path to MMseqs2 database directory. Only used with
+   ``--search-tool mmseqs2``. Defaults to ``$MMSEQS_DB_DIR``, then
+   ``$MMSEQS2DB``, then ``~/mmseqs2db``.
+
+.. option:: --mmseqs-db-source LABEL
+
+   Provenance label for MMseqs2 database origin, written to
+   ``search_metadata.json``. Only used with ``--search-tool mmseqs2``.
+
+.. option:: --mmseqs-sensitivity FLOAT
+
+   MMseqs2 sensitivity (range 1 to 7.5).
+   Only used with ``--search-tool mmseqs2``.
+
+   Default: ``5.7``
+
+.. option:: --mmseqs-search-type INT
+
+   MMseqs2 ``--search-type`` value passed to ``mmseqs easy-search``.
+   Common values include ``2`` (translated), ``3`` (nucleotide), and
+   ``4`` (translated nucleotide backtrace).
+   Only used with ``--search-tool mmseqs2``.
+
+   Default: ``3``
+
 Performance Options
 ^^^^^^^^^^^^^^^^^^^
 
@@ -226,6 +272,12 @@ Examples
    # Use custom BLAST database location
    eplace search query.fasta output_dir --blastdb-path /path/to/blastdb
 
+   # Use MMseqs2 with explicit backend configuration
+   eplace search query.fasta output_dir \
+       --search-tool mmseqs2 \
+       --mmseqs-db-path /path/to/mmseqsdb \
+       --mmseqs-database NT
+
 Output Structure
 ~~~~~~~~~~~~~~~~
 
@@ -247,7 +299,7 @@ Output Structure
 eplace grouped
 --------------
 
-Run BLAST search with grouped taxonomy analysis. Groups queries by taxonomic rank and creates one phylogenetic tree per group.
+Run sequence search with grouped taxonomy analysis. Groups queries by taxonomic rank and creates one phylogenetic tree per group.
 
 Usage
 ~~~~~
@@ -327,6 +379,52 @@ Database Options
 
    Path to BLAST database directory
 
+Search Backend Options
+^^^^^^^^^^^^^^^^^^^^^^
+
+.. option:: --search-tool {blast,mmseqs2}
+
+   Sequence search tool to use
+
+   Default: ``blast``
+
+.. option:: --blast-db-source LABEL
+
+   Provenance label written to ``search_metadata.json`` for reproducibility.
+   If not provided, this defaults to ``--database``.
+
+.. option:: --mmseqs-database NAME
+
+   MMseqs2 database name. Defaults to ``--database`` when omitted.
+   Only used with ``--search-tool mmseqs2``.
+
+.. option:: --mmseqs-db-path PATH
+
+   Path to MMseqs2 database directory. Only used with
+   ``--search-tool mmseqs2``. Defaults to ``$MMSEQS_DB_DIR``, then
+   ``$MMSEQS2DB``, then ``~/mmseqs2db``.
+
+.. option:: --mmseqs-db-source LABEL
+
+   Provenance label for MMseqs2 database origin, written to
+   ``search_metadata.json``. Only used with ``--search-tool mmseqs2``.
+
+.. option:: --mmseqs-sensitivity FLOAT
+
+   MMseqs2 sensitivity (range 1 to 7.5).
+   Only used with ``--search-tool mmseqs2``.
+
+   Default: ``5.7``
+
+.. option:: --mmseqs-search-type INT
+
+   MMseqs2 ``--search-type`` value passed to ``mmseqs easy-search``.
+   Common values include ``2`` (translated), ``3`` (nucleotide), and
+   ``4`` (translated nucleotide backtrace).
+   Only used with ``--search-tool mmseqs2``.
+
+   Default: ``3``
+
 Performance Options
 ^^^^^^^^^^^^^^^^^^^
 
@@ -373,6 +471,12 @@ Examples
 
    # Skip alignment and tree building
    eplace grouped query.fasta output_dir --skip-alignment
+
+   # Use MMseqs2 backend for grouped workflow
+   eplace grouped query.fasta output_dir \
+       --search-tool mmseqs2 \
+       --mmseqs-db-path /path/to/mmseqsdb \
+       --mmseqs-database NT
 
 Output Structure
 ~~~~~~~~~~~~~~~~

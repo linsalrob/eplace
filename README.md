@@ -108,8 +108,17 @@ ePLACE provides a unified command-line interface with four main commands:
 ### 1. Download NCBI Database
 
 ```bash
-# Download the core_nt database to default location
+# Download the BLAST core_nt database to default location
 eplace download
+
+# Download MMseqs2 NT database
+eplace download --target mmseqs2
+
+# Download both BLAST and MMseqs2 databases
+eplace download --target both
+
+# Download MMseqs2 NT and add taxonomy sidecar files
+eplace download --target mmseqs2 --add-taxonomy --ncbi-taxonomy /path/to/ncbi/taxonomy/current
 
 # Force redownload even if database exists
 eplace download --force
@@ -137,9 +146,9 @@ eplace search query.fasta output_dir --skip-alignment
 eplace search --help
 ```
 
-### 3. Run Grouped BLAST Analysis
+### 3. Run Grouped Search Analysis
 
-Run BLAST search and group queries by taxonomic rank for joint phylogenetic analysis:
+Run sequence search and group queries by taxonomic rank for joint phylogenetic analysis:
 
 ```bash
 # Basic usage (group by class, default)
@@ -256,6 +265,13 @@ eplace search QUERY_FASTA OUTPUT_DIR [OPTIONS]
 - `--database NAME`: BLAST database name (default: core_nt)
 - `--blastdb-path PATH`: Path to BLAST database directory
 - `--num-threads INT`: Number of threads for BLAST and alignment (default: 1)
+- `--search-tool {blast,mmseqs2}`: Sequence search backend to use (default: blast)
+- `--blast-db-source LABEL`: BLAST database provenance label for `search_metadata.json` (defaults to `--database`)
+- `--mmseqs-database NAME`: MMseqs2 database name (defaults to `--database` when using MMseqs2)
+- `--mmseqs-db-path PATH`: MMseqs2 database directory (defaults to `$MMSEQS_DB_DIR`, then `$MMSEQS2DB`, then `~/mmseqs2db`)
+- `--mmseqs-db-source LABEL`: MMseqs2 provenance label recorded in `search_metadata.json`
+- `--mmseqs-sensitivity FLOAT`: MMseqs2 sensitivity, range 1-7.5 (default: 5.7)
+- `--mmseqs-search-type INT`: MMseqs2 search type for `easy-search` (default: 3)
 - `--overwrite-existing-blast`: Overwrite existing BLAST results
 - `--skip-alignment`: Skip alignment and tree building steps
 - `--output-classification PATH`: Path to output classification TSV file
@@ -283,6 +299,13 @@ eplace grouped QUERY_FASTA OUTPUT_DIR [OPTIONS]
 - `--database NAME`: BLAST database name (default: core_nt)
 - `--blastdb-path PATH`: Path to BLAST database directory
 - `--num-threads INT`: Number of threads for BLAST and alignment (default: 1)
+- `--search-tool {blast,mmseqs2}`: Sequence search backend to use (default: blast)
+- `--blast-db-source LABEL`: BLAST database provenance label for `search_metadata.json` (defaults to `--database`)
+- `--mmseqs-database NAME`: MMseqs2 database name (defaults to `--database` when using MMseqs2)
+- `--mmseqs-db-path PATH`: MMseqs2 database directory (defaults to `$MMSEQS_DB_DIR`, then `$MMSEQS2DB`, then `~/mmseqs2db`)
+- `--mmseqs-db-source LABEL`: MMseqs2 provenance label recorded in `search_metadata.json`
+- `--mmseqs-sensitivity FLOAT`: MMseqs2 sensitivity, range 1-7.5 (default: 5.7)
+- `--mmseqs-search-type INT`: MMseqs2 search type for `easy-search` (default: 3)
 - `--overwrite-existing-blast`: Overwrite existing BLAST results
 - `--skip-alignment`: Skip alignment and tree building steps
 - `--alignment-tolerance INT`: Maximum coordinate difference for alignment consistency (default: 50)

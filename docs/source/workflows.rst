@@ -11,7 +11,7 @@ ePLACE provides two main workflow types for analyzing environmental DNA sequence
 Common Pipeline Steps
 ~~~~~~~~~~~~~~~~~~~~~
 
-1. **BLAST Search** - Search query sequences against NCBI database
+1. **Sequence Search** - Search query sequences with BLAST or MMseqs2
 2. **Filter Results** - Apply identity and coverage thresholds
 3. **Taxonomic Classification** - Classify hits using TaxonKit
 4. **Representative Selection** - Select representative sequences per taxonomic rank
@@ -40,7 +40,7 @@ Process
 .. code-block:: text
 
    For each query sequence:
-   1. BLAST search → filter hits
+   1. Sequence search (BLAST/MMseqs2) → filter hits
    2. Classify hits taxonomically
    3. Select representatives at specified rank
    4. Create query-specific directory
@@ -102,7 +102,7 @@ Process
 
 .. code-block:: text
 
-   1. BLAST search all queries → filter hits
+   1. Sequence search all queries (BLAST/MMseqs2) → filter hits
    2. Classify hits taxonomically
    3. Select representatives for each query at specified rank
    4. Group queries by taxonomic rank (e.g., class, order, family)
@@ -315,7 +315,7 @@ Control which BLAST hits are included:
 Database Parameters
 ~~~~~~~~~~~~~~~~~~~
 
-Configure BLAST database usage:
+Configure search database usage:
 
 * ``--database``: BLAST database name (default: core_nt)
 
@@ -326,6 +326,27 @@ Configure BLAST database usage:
 
   * Overrides $BLASTDB environment variable
   * Use for non-standard locations
+
+* ``--search-tool``: Search backend to use (default: ``blast``)
+
+  * Options: ``blast``, ``mmseqs2``
+  * Applies to individual and grouped workflows
+  * Choose MMseqs2 for alternate search backend behavior
+
+* ``--mmseqs-database``: MMseqs2 database name
+
+  * Defaults to ``--database`` when omitted
+  * Used only when ``--search-tool mmseqs2`` is selected
+
+* ``--mmseqs-db-path``: Custom path to MMseqs2 database directory
+
+  * Defaults to ``$MMSEQS_DB_DIR``, then ``$MMSEQS2DB``, then ``~/mmseqs2db``
+  * Used only when ``--search-tool mmseqs2`` is selected
+
+* ``--blast-db-source`` / ``--mmseqs-db-source``: Provenance labels for search metadata
+
+  * Recorded in ``search_metadata.json`` for reproducibility
+  * Use these labels to document custom or non-standard databases
 
 Performance Parameters
 ~~~~~~~~~~~~~~~~~~~~~~

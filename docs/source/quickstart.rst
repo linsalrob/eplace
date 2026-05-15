@@ -10,25 +10,35 @@ Before you begin, ensure you have:
 
 1. Installed ePLACE and its dependencies (see :doc:`installation`)
 2. BLAST+ tools installed (``blastn``, ``blastdbcmd``)
-3. TaxonKit installed
-4. (Optional) MAFFT and IQTree for alignment and phylogenetic analysis
+3. MMseqs2 installed (if you plan to use ``--search-tool mmseqs2``)
+4. TaxonKit installed
+5. (Optional) MAFFT and IQTree for alignment and phylogenetic analysis
 
 Your First Analysis
 -------------------
 
-Step 1: Download the NCBI Database
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Step 1: Download Search Databases
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-First, download the NCBI BLAST database:
+First, download the database backend(s) you want to use:
 
 .. code-block:: bash
 
+   # Download BLAST core_nt database (default)
    eplace download
 
-This will download the ``core_nt`` database to your BLASTDB location (``$BLASTDB`` or ``~/blastdb``).
+   # Download MMseqs2 NT database
+   eplace download --target mmseqs2
+
+   # Download both BLAST and MMseqs2 databases
+   eplace download --target both
+
+By default, BLAST core_nt is downloaded to your BLASTDB location
+(``$BLASTDB`` or ``~/blastdb``). MMseqs2 databases use ``$MMSEQS_DB_DIR``,
+then ``$MMSEQS2DB``, then ``~/mmseqs2db``.
 
 .. note::
-   This is a large download (several GB) and may take some time. You only need to do this once.
+   These are large downloads and may take some time. You only need to do this once per backend.
 
 Step 2: Prepare Your Query Sequences
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

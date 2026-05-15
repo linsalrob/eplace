@@ -30,7 +30,7 @@ Using Conda/Mamba (Recommended)
 
 .. code-block:: bash
 
-   mamba install -y bioconda::blast bioconda::pytaxonkit bioconda::iqtree bioconda::mafft
+   mamba install -y bioconda::blast bioconda::mmseqs2 bioconda::pytaxonkit bioconda::iqtree bioconda::mafft
 
 .. note::
    At the time of writing there is an `issue <https://github.com/bioforensics/pytaxonkit/issues/50>`_ with conda not installing the
@@ -176,24 +176,36 @@ After installation, verify that ePLACE is installed correctly:
    # Test that TaxonKit is available
    taxonkit version
 
-Download NCBI Database
-----------------------
+Download Search Databases
+-------------------------
 
-Before running analyses, you need to download the NCBI BLAST database:
+Before running analyses, download the search database backend(s) you plan to use:
 
 .. code-block:: bash
 
-   # Download core_nt database to default location
+   # Download BLAST core_nt database to default location
    eplace download
+
+   # Download MMseqs2 NT database
+   eplace download --target mmseqs2
+
+   # Download both BLAST core_nt and MMseqs2 NT
+   eplace download --target both
+
+   # Download MMseqs2 NT and add taxonomy sidecar files
+   eplace download --target mmseqs2 --add-taxonomy --ncbi-taxonomy /path/to/ncbi/taxonomy/current
 
    # Force redownload even if database exists
    eplace download --force
 
-The database will be stored in ``$BLASTDB`` if set, otherwise in ``~/blastdb``.
+BLAST database files are stored in ``$BLASTDB`` (if set) or ``~/blastdb``.
+MMseqs2 database files are stored in ``$MMSEQS_DB_DIR``, then ``$MMSEQS2DB``,
+or ``~/mmseqs2db``.
 
 .. warning::
-   The NCBI core_nt database is very large (several GB). Ensure you have sufficient disk space 
-   and bandwidth before downloading. The download may take a significant amount of time depending 
+   Search databases are large. Ensure you have sufficient disk space and bandwidth before downloading.
+   MMseqs2 NT download typically requires at least 64 GiB RAM, and MMseqs2 taxonomy integration
+   typically requires at least 128 GiB RAM. Downloads may take a significant amount of time depending
    on your internet connection.
 
 Development Installation
