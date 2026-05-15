@@ -331,6 +331,8 @@ Configure search database usage:
 
   * Options: ``blast``, ``mmseqs2``
   * Applies to individual and grouped workflows
+  * BLAST is the conservative default; MMseqs2 can be preferable for
+    MMseqs-native ecosystems and for tuning speed/sensitivity trade-offs
   * Choose MMseqs2 when you already maintain MMseqs2 databases or want to
     align your workflow with MMseqs2-based pipelines
 
