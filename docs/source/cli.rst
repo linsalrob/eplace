@@ -214,6 +214,8 @@ Search Backend Options
 .. option:: --mmseqs-sensitivity FLOAT
 
    MMseqs2 sensitivity (range 1 to 7.5).
+   Lower values are faster but less sensitive; higher values are slower but
+   more thorough.
    Only used with ``--search-tool mmseqs2``.
 
    Default: ``5.7``
@@ -412,6 +414,8 @@ Search Backend Options
 .. option:: --mmseqs-sensitivity FLOAT
 
    MMseqs2 sensitivity (range 1 to 7.5).
+   Lower values are faster but less sensitive; higher values are slower but
+   more thorough.
    Only used with ``--search-tool mmseqs2``.
 
    Default: ``5.7``
