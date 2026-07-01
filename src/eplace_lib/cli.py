@@ -37,6 +37,7 @@ from .alignment import (
 )
 
 # Configure logging (level is overridden at runtime via --log-level)
+RANK_CHOICES = ['phylum', 'class', 'order', 'family', 'genus', 'species', 'no_rank']
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
@@ -1333,14 +1334,14 @@ Notes:
         '--rank',
         type=str,
         default='genus',
-        choices=['phylum', 'class', 'order', 'family', 'genus', 'species'],
+        choices=RANK_CHOICES,
         help='Taxonomic rank for representative selection (default: genus)'
     )
     search_parser.add_argument(
         '--tree-label-rank',
         type=str,
         default='genus',
-        choices=['phylum', 'class', 'order', 'family', 'genus', 'species'],
+        choices=RANK_CHOICES,
         help='Taxonomic rank for tree labeling (default: genus)'
     )
     search_parser.add_argument(
@@ -1518,28 +1519,28 @@ Notes:
         '--rank',
         type=str,
         default='genus',
-        choices=['phylum', 'class', 'order', 'family', 'genus', 'species'],
+        choices=RANK_CHOICES,
         help='Taxonomic rank for representative selection (default: genus)'
     )
     grouped_parser.add_argument(
         '--group-rank',
         type=str,
         default='class',
-        choices=['phylum', 'class', 'order', 'family', 'genus', 'species'],
+        choices=RANK_CHOICES,
         help='Taxonomic rank for grouping sequences (default: class)'
     )
     grouped_parser.add_argument(
         '--tree-label-rank',
         type=str,
         default='genus',
-        choices=['phylum', 'class', 'order', 'family', 'genus', 'species'],
+        choices=RANK_CHOICES,
         help='Taxonomic rank for tree labeling (default: genus)'
     )
     grouped_parser.add_argument(
         '--combined-tree-label-rank',
         type=str,
         default=None,
-        choices=['phylum', 'class', 'order', 'family', 'genus', 'species'],
+        choices=RANK_CHOICES,
         help='Taxonomic rank for tree labeling for the combined tree. If not provided, the combined tree will not be built (to save time with large datasets).'
     )
     grouped_parser.add_argument(

@@ -12,6 +12,7 @@ import logging
 from typing import Optional, Dict, Tuple, Callable
 from pathlib import Path
 from dataclasses import dataclass
+from .header_parsing import is_missing_taxid, recover_taxid_from_subject_title
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -341,7 +342,7 @@ class BlastRunner:
         num_threads: int = 1,
         max_target_seqs: int = 100,
         evalue: float = 1e-5,
-        outfmt: str = "6 qseqid sseqid pident length qlen slen qstart qend sstart send evalue bitscore staxid staxids"
+        outfmt: str = "6 qseqid sseqid pident length qlen slen qstart qend sstart send evalue bitscore staxid staxids stitle"
     ) -> bool:
         """
         Run blastn search.
@@ -459,8 +460,22 @@ class BlastRunner:
                     bit_score = float(fields[11])
                     staxid = fields[12]
                     staxids = fields[13]
-                    
-                    # Calculate query coverage
+                    subject_title = fields[14] if len(fields) > 14 else ""
+
+                    if is_missing_taxid(staxid) and subject_title:
+                        parsed_subject_id, parsed_taxid = recover_taxid_from_subject_title(subject_title)
+
+                        if parsed_taxid:
+                            staxid = parsed_taxid
+
+                            if is_missing_taxid(staxids):
+                                staxids = parsed_taxid
+
+                            if not subject_id:
+                                subject_id = parsed_subject_id
+	
+
+		    # Calculate query coverage
                     query_coverage = (abs(query_end - query_start) + 1) / query_length * 100
                     
                     hit = BlastHit(
