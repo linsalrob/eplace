@@ -9,7 +9,7 @@ import os
 import re
 import subprocess
 import logging
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, Callable
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -136,7 +136,49 @@ def _extract_accession_from_pipe_id(seq_id: str) -> str:
     return seq_id
 
 
-def normalize_sequence_id(seq_id: str) -> str:
+def _parse_nbdl_custom_header(header: str) -> Tuple[str, str, str]:
+    """
+    Parse a custom NBDL database header to extract key components.
+    
+    This parser handles headers in the NBDL format:
+    >NBDL-HR5SFP7MHKSYMG.v1.mt|13904-15593|+|MT-RNR2 [species=...] [dbxref=...] ... |taxid=80951
+    
+    Extracts:
+    1. Sequence ID: Everything before the first space/bracket (e.g., NBDL-HR5SFP7MHKSYMG.v1.mt|13904-15593|+|MT-RNR2)
+    2. Description: The description text between the end of sequence ID and first bracket (e.g., organism name and gene description)
+    3. TaxID: The taxid value from the final |taxid=XXXXX segment
+    
+    Args:
+        header: The full FASTA header (including '>').
+    
+    Returns:
+        Tuple of (sequence_id, description, taxid) or (sequence_id, '', '') if parsing fails.
+    """
+    if not header:
+        return (header, '', '')
+    
+    # Remove leading '>'
+    header = header.lstrip('>')
+    
+    # Extract sequence ID (first token before space or bracket)
+    seq_id_match = re.match(r'([^\s\[]+)', header)
+    seq_id = seq_id_match.group(1) if seq_id_match else header
+    
+    # Extract taxid from the header (look for |taxid=XXXXX pattern)
+    taxid = ''
+    taxid_match = re.search(r'\|taxid=(\d+)', header)
+    if taxid_match:
+        taxid = taxid_match.group(1)
+    
+    # Extract description: the text between sequence ID and first bracket
+    # This captures organism name and gene description
+    desc_match = re.search(r'^' + re.escape(seq_id) + r'\s+([^\[]*)', header)
+    description = desc_match.group(1).strip() if desc_match else ''
+    
+    return (seq_id, description, taxid)
+
+
+def normalize_sequence_id(seq_id: str, parser: Optional[Callable[[str], str]] = None) -> str:
     """
     Normalize an arbitrary sequence or tree label to a canonical accession-like identifier.
 
@@ -150,15 +192,22 @@ def normalize_sequence_id(seq_id: str) -> str:
     4. If the token contains pipes ('|'), extract the accession via _extract_accession_from_pipe_id()
        (gi|...|gb|ACC|, ref|ACC|, gb|ACC|, etc.).
     5. Otherwise return the token unchanged.
+    
+    If a custom parser is provided, it will be used instead of the default NCBI-style parsing.
 
     Args:
         seq_id: Raw sequence identifier from any source.
+        parser: Optional custom parser function to apply instead of default parsing.
 
     Returns:
         Canonical accession string suitable for exact comparison.
     """
     if not seq_id:
         return seq_id
+
+    # If a custom parser is provided, use it
+    if parser:
+        return parser(seq_id)
 
     # Step 1: strip leading '>'
     token = seq_id.lstrip('>')

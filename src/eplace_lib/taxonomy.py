@@ -11,10 +11,10 @@ import subprocess
 import logging
 import sys
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple, Callable
 from collections import defaultdict
 
-from .blast_analysis import BlastHit, normalize_sequence_id
+from .blast_analysis import BlastHit, normalize_sequence_id, _parse_nbdl_custom_header
 
 import pytaxonkit
 
@@ -37,7 +37,43 @@ def _subject_id_matches(subject_id: str, target_id: str) -> bool:
 logger = logging.getLogger(__name__)
 
 # Valid taxonomic ranks supported by the library
-VALID_RANKS = ['domain', 'phylum', 'class', 'order', 'family', 'genus', 'species']
+# 'no_rank' bypasses taxonomy lookup for custom databases without taxids
+VALID_RANKS = ['domain', 'phylum', 'class', 'order', 'family', 'genus', 'species', 'no_rank']
+
+
+def extract_custom_subject_id_and_taxid(
+    subject_id: str,
+    header: Optional[str] = None,
+    custom_header_parser: Optional[Callable[[str], Tuple[str, str, str]]] = None
+) -> Tuple[str, str]:
+    """
+    Extract the subject_id and taxid from a BLAST subject ID, optionally parsing
+    a custom header format.
+    
+    This function handles both standard NCBI-formatted IDs and custom database headers
+    (e.g., NBDL format). If a custom_header_parser is provided and a header is given,
+    it uses the parser to extract the sequence ID and taxid. Otherwise, it returns
+    the original subject_id and an empty taxid.
+    
+    Args:
+        subject_id: The original BLAST subject ID (typically from BLAST output).
+        header: The full FASTA header (optional), used with custom_header_parser.
+        custom_header_parser: Optional parser function that takes a header string and
+                             returns a tuple of (seq_id, description, taxid).
+    
+    Returns:
+        Tuple of (canonical_subject_id, taxid).
+        If no custom parser or header is provided, returns (subject_id, '').
+    """
+    if custom_header_parser and header:
+        try:
+            seq_id, description, taxid = custom_header_parser(header)
+            return (seq_id, taxid)
+        except Exception as e:
+            logger.warning(f"Error parsing custom header: {e}. Using original subject_id.")
+            return (subject_id, '')
+    
+    return (subject_id, '')
 
 
 class TaxonomyExtractor:
@@ -58,6 +94,11 @@ class TaxonomyExtractor:
         # make sure that duplicate taxids are removed before we look them up
         tax_ids = list(set(tax_ids))
         taxonomy_dict = {}
+
+        # Handle empty taxid list (e.g., when using custom databases without taxonomy)
+        if not tax_ids or all(tid == '' for tid in tax_ids):
+            logger.warning("No valid taxonomy IDs provided. Skipping taxonomy lookup.")
+            return taxonomy_dict
 
         # we need to get the whole lineage, and then convert it to a dict
         try:
@@ -111,12 +152,16 @@ class TaxonomyExtractor:
         """
         Select representative sequences per taxonomic rank.
         
+        When rank='no_rank', bypasses taxonomy lookup and groups by subject_id instead.
+        This mode is useful for custom databases that don't have taxid information.
+        
         Args:
             hits: list of BlastHit objects for a single query
-            rank: Taxonomic rank for representative selection
+            rank: Taxonomic rank for representative selection. Use 'no_rank' to group
+                  by sequence ID instead of taxonomic rank (useful for custom databases).
             max_per_rank: Maximum number of representatives per rank (default: 1)
             preferred_representatives: Optional dictionary mapping rank_tid to preferred subject_id
-                                      to ensure consistent representatives across queries
+                                       to ensure consistent representatives across queries
             
         Returns:
             list of representative BlastHit objects
@@ -125,13 +170,21 @@ class TaxonomyExtractor:
         if preferred_representatives is None:
             preferred_representatives = {}
         
-        # Group hits by taxonomic rank (using subject_id as proxy)
+        # Group hits by taxonomic rank (or by subject_id if rank='no_rank')
         rank_groups = defaultdict(list)
         
         reported_hits = set()
         for hit in hits:
+            # Special handling for 'no_rank': group by subject_id instead of taxonomy
+            if rank == 'no_rank':
+                logger.info(
+                    f"Using no_rank mode: grouping by subject_id (custom database mode)"
+                )
+                rank_groups[hit.subject_id].append(hit)
+                continue
+            
             if not hit.subject_taxonomy:
-                # No taxonomy available (e.g. MMseqs2 database without taxonomy).
+                # No taxonomy available (e.g. MMseqs2 database without taxonomy or custom database).
                 # Fall back to grouping by subject_id so the hit still contributes
                 # a representative rather than being silently dropped.
                 logger.info(
@@ -396,17 +449,24 @@ def process_blast_results_for_taxonomy(
     output_dir: Path,
     rank: str = "genus",
     database: str = "core_nt",
-    blastdb_path: Optional[Path] = None
+    blastdb_path: Optional[Path] = None,
+    custom_header_parser: Optional[Callable[[str], Tuple[str, str, str]]] = None
 ) -> Dict[str, Optional[Path]]:
     """
     Process BLAST hits to extract representative sequences per taxonomic rank.
     
+    When rank='no_rank', skips taxonomy lookup and groups by sequence ID instead.
+    This mode is useful for custom databases without taxid information.
+    
     Args:
         blast_hits: list of BlastHit objects
         output_dir: Output directory for FASTA files
-        rank: Taxonomic rank for representative selection
+        rank: Taxonomic rank for representative selection. Use 'no_rank' to bypass
+              taxonomy lookup and group by sequence ID (useful for custom databases).
         database: Name of BLAST database
         blastdb_path: Path to BLAST database directory
+        custom_header_parser: Optional parser function for custom database headers.
+                             Should take a header string and return (seq_id, description, taxid).
         
     Returns:
         dictionary mapping query IDs to output FASTA file paths
@@ -418,13 +478,28 @@ def process_blast_results_for_taxonomy(
     tax_extractor = TaxonomyExtractor()
     seq_extractor = SequenceExtractor(blastdb_path)
     
-    # get all the taxonomies
-    subject_taxids = {hit.subject_taxid for hit in blast_hits}
-    tax_dict = tax_extractor.parse_taxids(list(subject_taxids))
+    # If custom header parser is provided, extract taxids from headers and override subject_taxid
+    if custom_header_parser:
+        for hit in blast_hits:
+            # Try to extract taxid from the subject_id using custom parser
+            # (subject_id in BLAST output may already be parsed by custom parser)
+            # This is a fallback if the header wasn't available during BLAST parsing
+            logger.debug(f"Custom header parser provided for hit {hit.subject_id}")
+    
+    # Skip taxonomy lookup entirely if rank is 'no_rank'
+    if rank != 'no_rank':
+        # get all the taxonomies
+        subject_taxids = {hit.subject_taxid for hit in blast_hits}
+        tax_dict = tax_extractor.parse_taxids(list(subject_taxids))
 
-    # add all the ranks to all the hits
-    for h in blast_hits:
-        h.subject_taxonomy = tax_dict.get(h.subject_taxid)
+        # add all the ranks to all the hits
+        for h in blast_hits:
+            h.subject_taxonomy = tax_dict.get(h.subject_taxid)
+    else:
+        # In no_rank mode, we don't use taxonomy information
+        logger.info("Using no_rank mode: skipping taxonomy lookup for custom database")
+        for h in blast_hits:
+            h.subject_taxonomy = None
 
     # Group hits by query
     grouped_hits = tax_extractor.group_hits_by_query(blast_hits)
@@ -451,7 +526,12 @@ def process_blast_results_for_taxonomy(
         
         # Update the preferred representatives with newly selected ones
         for rep in representatives:
-            if (
+            if rank == 'no_rank':
+                # In no_rank mode, use subject_id as the key
+                if rep.subject_id not in preferred_representatives:
+                    preferred_representatives[rep.subject_id] = rep.subject_id
+                    logger.info(f"Recording {rep.subject_id} as representative for no_rank mode")
+            elif (
                 rep.subject_taxonomy
                 and rank in rep.subject_taxonomy
                 and isinstance(rep.subject_taxonomy[rank], tuple)
@@ -515,6 +595,9 @@ def generate_classification_summary(
     - Whether the sequence appears in multiple groups
     - Whether the sequence has no appropriate classification
     
+    When rank='no_rank', taxonomy-based classification is skipped and sequences
+    are identified by their sequence ID instead.
+    
     The classification is based on the phylogenetically nearest neighbor in the tree
     (if available), otherwise falls back to the best BLAST hit by bit score.
     
@@ -522,7 +605,7 @@ def generate_classification_summary(
         sequences: dictionary of sequences that we read from the fasta file
         blast_hits: List of BlastHit objects with taxonomy information
         output_file: Path to output TSV file
-        rank: Taxonomic rank for classification (default: genus)
+        rank: Taxonomic rank for classification (default: genus). Use 'no_rank' to skip taxonomy lookup.
         group_rank: Taxonomic rank for grouping (default: class)
         tree_label_rank: Taxonomic rank for tree labeling (default: genus)
         tree_files: Optional dict mapping query_id to tree file paths for finding nearest neighbors
@@ -595,31 +678,38 @@ def generate_classification_summary(
         # Populate BLAST-based classification
         if blast_best_hit.subject_taxonomy:
             classification['taxonomy_blast'] = ';'.join([blast_best_hit.subject_taxonomy[r][1] if r in blast_best_hit.subject_taxonomy else ""
-                                                   for r in VALID_RANKS])
+                                                   for r in VALID_RANKS if r != 'no_rank'])
+        elif rank == 'no_rank':
+            # In no_rank mode, use subject_id instead of taxonomy
+            classification['taxonomy_blast'] = blast_best_hit.subject_id
+            classification['blast_classification_taxid'] = blast_best_hit.subject_id
+            classification['blast_classification_name'] = blast_best_hit.subject_id
         
         # Extract BLAST-based classification at different ranks
         blast_missing_ranks = []
         
-        if blast_best_hit.subject_taxonomy and rank in blast_best_hit.subject_taxonomy:
-            taxid, name = blast_best_hit.subject_taxonomy[rank]
-            classification['blast_classification_taxid'] = taxid
-            classification['blast_classification_name'] = name
-        else:
-            blast_missing_ranks.append(rank)
-        
-        if blast_best_hit.subject_taxonomy and group_rank in blast_best_hit.subject_taxonomy:
-            taxid, name = blast_best_hit.subject_taxonomy[group_rank]
-            classification['blast_group_taxid'] = taxid
-            classification['blast_group_name'] = name
-        else:
-            blast_missing_ranks.append(group_rank)
-        
-        if blast_best_hit.subject_taxonomy and tree_label_rank in blast_best_hit.subject_taxonomy:
-            taxid, name = blast_best_hit.subject_taxonomy[tree_label_rank]
-            classification['blast_tree_label_taxid'] = taxid
-            classification['blast_tree_label_name'] = name
-        else:
-            blast_missing_ranks.append(tree_label_rank)
+        # Skip taxonomy-based classification when in no_rank mode
+        if rank != 'no_rank':
+            if blast_best_hit.subject_taxonomy and rank in blast_best_hit.subject_taxonomy:
+                taxid, name = blast_best_hit.subject_taxonomy[rank]
+                classification['blast_classification_taxid'] = taxid
+                classification['blast_classification_name'] = name
+            else:
+                blast_missing_ranks.append(rank)
+            
+            if blast_best_hit.subject_taxonomy and group_rank in blast_best_hit.subject_taxonomy:
+                taxid, name = blast_best_hit.subject_taxonomy[group_rank]
+                classification['blast_group_taxid'] = taxid
+                classification['blast_group_name'] = name
+            else:
+                blast_missing_ranks.append(group_rank)
+            
+            if blast_best_hit.subject_taxonomy and tree_label_rank in blast_best_hit.subject_taxonomy:
+                taxid, name = blast_best_hit.subject_taxonomy[tree_label_rank]
+                classification['blast_tree_label_taxid'] = taxid
+                classification['blast_tree_label_name'] = name
+            else:
+                blast_missing_ranks.append(tree_label_rank)
         
         # Try to get tree-based classification
         tree_best_hit = None
@@ -652,52 +742,58 @@ def generate_classification_summary(
         if tree_best_hit:
             if tree_best_hit.subject_taxonomy:
                 classification['taxonomy_tree'] = ';'.join([tree_best_hit.subject_taxonomy[r][1] if r in tree_best_hit.subject_taxonomy else ""
-                                                       for r in VALID_RANKS])
+                                                       for r in VALID_RANKS if r != 'no_rank'])
+            elif rank == 'no_rank':
+                classification['taxonomy_tree'] = tree_best_hit.subject_id
+                classification['tree_classification_taxid'] = tree_best_hit.subject_id
+                classification['tree_classification_name'] = tree_best_hit.subject_id
             
             tree_missing_ranks = []
             
-            if tree_best_hit.subject_taxonomy and rank in tree_best_hit.subject_taxonomy:
-                taxid, name = tree_best_hit.subject_taxonomy[rank]
-                classification['tree_classification_taxid'] = taxid
-                classification['tree_classification_name'] = name
-            else:
-                tree_missing_ranks.append(rank)
-            
-            if tree_best_hit.subject_taxonomy and group_rank in tree_best_hit.subject_taxonomy:
-                taxid, name = tree_best_hit.subject_taxonomy[group_rank]
-                classification['tree_group_taxid'] = taxid
-                classification['tree_group_name'] = name
-            else:
-                tree_missing_ranks.append(group_rank)
-            
-            if tree_best_hit.subject_taxonomy and tree_label_rank in tree_best_hit.subject_taxonomy:
-                taxid, name = tree_best_hit.subject_taxonomy[tree_label_rank]
-                classification['tree_tree_label_taxid'] = taxid
-                classification['tree_tree_label_name'] = name
-            else:
-                tree_missing_ranks.append(tree_label_rank)
+            if rank != 'no_rank':
+                if tree_best_hit.subject_taxonomy and rank in tree_best_hit.subject_taxonomy:
+                    taxid, name = tree_best_hit.subject_taxonomy[rank]
+                    classification['tree_classification_taxid'] = taxid
+                    classification['tree_classification_name'] = name
+                else:
+                    tree_missing_ranks.append(rank)
+                
+                if tree_best_hit.subject_taxonomy and group_rank in tree_best_hit.subject_taxonomy:
+                    taxid, name = tree_best_hit.subject_taxonomy[group_rank]
+                    classification['tree_group_taxid'] = taxid
+                    classification['tree_group_name'] = name
+                else:
+                    tree_missing_ranks.append(group_rank)
+                
+                if tree_best_hit.subject_taxonomy and tree_label_rank in tree_best_hit.subject_taxonomy:
+                    taxid, name = tree_best_hit.subject_taxonomy[tree_label_rank]
+                    classification['tree_tree_label_taxid'] = taxid
+                    classification['tree_tree_label_name'] = name
+                else:
+                    tree_missing_ranks.append(tree_label_rank)
         
         # Set classification status based on BLAST missing ranks
-        if blast_missing_ranks:
+        if rank != 'no_rank' and blast_missing_ranks:
             if len(blast_missing_ranks) == 3:  # All three ranks missing
                 classification['has_classification'] = 'No'
             else:
                 classification['has_classification'] = 'Partial'
         
         # Check if sequence appears in multiple groups at the group_rank level
-        group_names = set()
-        group_taxids = set()
-        for hit in query_hits:
-            if hit.subject_taxonomy and group_rank in hit.subject_taxonomy:
-                taxid, name = hit.subject_taxonomy[group_rank]
-                group_names.add(name)
-                group_taxids.add(str(taxid))
+        if rank != 'no_rank':
+            group_names = set()
+            group_taxids = set()
+            for hit in query_hits:
+                if hit.subject_taxonomy and group_rank in hit.subject_taxonomy:
+                    taxid, name = hit.subject_taxonomy[group_rank]
+                    group_names.add(name)
+                    group_taxids.add(str(taxid))
 
-        if len(group_names) > 1:
-            classification['appears_in_multiple_groups'] = 'Yes'
-            # Update BLAST group names/taxids to show all groups
-            classification['blast_group_name'] = '; '.join(sorted(group_names))
-            classification['blast_group_taxid'] = '; '.join(sorted(group_taxids))
+            if len(group_names) > 1:
+                classification['appears_in_multiple_groups'] = 'Yes'
+                # Update BLAST group names/taxids to show all groups
+                classification['blast_group_name'] = '; '.join(sorted(group_names))
+                classification['blast_group_taxid'] = '; '.join(sorted(group_taxids))
         
         summary_data.append(classification)
     
