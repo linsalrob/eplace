@@ -521,28 +521,44 @@ class IQTreeBuilder:
             # Create mapping of sequence accession to taxonomic name
             # Trees will have accessions (e.g., MZ387488.1) not full IDs
             label_map = {}
+
             for hit in blast_hits:
-                label = "unknown"
+                label = hit.subject_id
+
                 if isinstance(hit.subject_taxonomy, dict) and taxonomic_rank in hit.subject_taxonomy:
                     label = hit.subject_taxonomy[taxonomic_rank][1]
-                label_map[hit.subject_id] = label
-                if label:
-                    # Clean up the label for tree format (Newick format constraints)
-                    # Replace spaces, colons, parentheses, commas, and semicolons
-                    clean_label = (label.replace(' ', '_')
-                                  .replace(':', '_')
-                                  .replace('(', '_')
-                                  .replace(')', '_')
-                                  .replace(',', '_')
-                                  .replace(';', '_'))
-                    # Use accession for mapping since that's what appears in trees
-                    accession = hit.get_accession()
-                    label_map[accession] = clean_label
+
+                clean_label = (label.replace(' ', '_')
+                              .replace(':', '_')
+                              .replace('(', '_')
+                              .replace(')', '_')
+                              .replace(',', '_')
+                              .replace(';', '_')
+                              .replace('|', '_')
+                              .replace('/', '_'))
+
+                # Map the exact BLAST subject ID
+                label_map[hit.subject_id] = clean_label
+
+                # Map accession-style ID, useful for NCBI accessions
+                accession = hit.get_accession()
+                label_map[accession] = clean_label
+
+                # Map the sanitized version that may appear after FASTA/tree handling
+                safe_subject_id = (hit.subject_id.replace('|', '_')
+                                                 .replace('/', '_')
+                                                 .replace(' ', '_'))
+                label_map[safe_subject_id] = clean_label
 
             # Read the tree file
             with open(tree_file, 'r') as f:
                 tree_string = f.read()
-            
+            print("DEBUG relabel function is running")
+            print("DEBUG taxonomic_rank:", taxonomic_rank)
+            print("DEBUG first label_map entries:", list(label_map.items())[:5])
+            print("DEBUG first 300 chars before:", tree_string[:300])
+                
+            replacements = 0
             # Replace sequence IDs with taxonomic names
             for seq_id, tax_name in label_map.items():
                 # Handle normal sequences (not reversed)
@@ -559,6 +575,12 @@ class IQTreeBuilder:
                 tree_string = tree_string.replace(f"({reversed_seq_id}:", f"({reversed_label}:")
                 tree_string = tree_string.replace(f",{reversed_seq_id}:", f",{reversed_label}:")
                 tree_string = tree_string.replace(f" {reversed_seq_id}:", f" {reversed_label}:")
+                
+                if tree_string != before:
+                    replacements += 1
+
+            print("DEBUG replacements:", replacements)
+            print("DEBUG first 300 chars after:", tree_string[:300])
             
             # Write the relabeled tree
             with open(output_tree, 'w') as f:
