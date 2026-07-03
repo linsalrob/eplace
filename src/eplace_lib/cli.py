@@ -599,6 +599,12 @@ def blast_command(args):
                 tree_files_map[query_id] = tree_file
     
     try:
+        
+        print("DEBUG classification output:", args.output_classification)
+        print("DEBUG number sequences:", len(sequences))
+        print("DEBUG number filtered_hits:", len(filtered_hits))
+        print("DEBUG tree_files_map:", tree_files_map)
+        
         success = generate_classification_summary(
             sequences=sequences,
             blast_hits=filtered_hits,
@@ -608,6 +614,8 @@ def blast_command(args):
             tree_label_rank=args.tree_label_rank,
             tree_files=tree_files_map if tree_files_map else None
         )
+        
+        print("DEBUG classification success:", success)
         
         if success:
             logger.info(f"✓ Classification summary: {args.output_classification}")

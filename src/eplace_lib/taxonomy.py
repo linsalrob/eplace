@@ -555,6 +555,33 @@ def process_blast_results_for_taxonomy(
     
     return results
 
+# This is the new dictionary to help create the look up for the classification output
+def make_safe_taxonomic_tree_label(hit: BlastHit, label_rank: str = "species") -> str:
+    """
+    Create the same safe tree/FASTA label used after trimming in alignment.py.
+
+    This lets classification map a tree leaf label back to the original BlastHit.
+    """
+    taxid = hit.subject_taxid
+    tax_label = hit.subject_id
+
+    if isinstance(hit.subject_taxonomy, dict) and label_rank in hit.subject_taxonomy:
+        taxid, tax_label = hit.subject_taxonomy[label_rank]
+
+    safe_label = (
+        f"{taxid}_{tax_label}"
+        .replace(" ", "_")
+        .replace(":", "_")
+        .replace("(", "_")
+        .replace(")", "_")
+        .replace(",", "_")
+        .replace(";", "_")
+        .replace("|", "_")
+        .replace("/", "_")
+    )
+
+    return safe_label
+
 def sort_strings_and_numbers(s: str):
     """
     Extract text and numbers from strings for proper sorting.
@@ -574,6 +601,306 @@ def sort_strings_and_numbers(s: str):
         num_part = int(match.group(2))
         return (text_part, num_part)
     return (s, 0)
+
+# Adding new lines to to update the classification output
+DECISION_RANK_ORDER = [
+    "domain",
+    "phylum",
+    "class",
+    "order",
+    "family",
+    "genus",
+    "species",
+]
+
+MIN_IDENTITY_FOR_RANK = {
+    "species": 99.0,
+    "genus": 97.0,
+    "family": 95.0,
+    "order": 90.0,
+    "class": 85.0,
+    "phylum": 80.0,
+    "domain": 0.0,
+}
+
+COMPETING_IDENTITY_WINDOW = 1.0
+COMPETING_COVERAGE_WINDOW = 5.0
+
+
+def _safe_float(value):
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def _get_taxon_at_rank(hit: BlastHit, rank: str):
+    if hit.subject_taxonomy and rank in hit.subject_taxonomy:
+        return hit.subject_taxonomy[rank]
+    return ("N/A", "N/A")
+
+
+def _find_lca_rank(hits: List[BlastHit]):
+    """
+    Find the lowest shared taxonomic rank among competing hits.
+    """
+    if not hits:
+        return ("N/A", "N/A", "N/A")
+
+    for rank in reversed(DECISION_RANK_ORDER):
+        observed = set()
+
+        for hit in hits:
+            taxid, name = _get_taxon_at_rank(hit, rank)
+
+            if taxid == "N/A" or name == "N/A":
+                observed.add(("missing", "missing"))
+            else:
+                observed.add((str(taxid), name))
+
+        if len(observed) == 1:
+            taxid, name = next(iter(observed))
+
+            if taxid != "missing":
+                return (rank, taxid, name)
+
+    return ("N/A", "N/A", "N/A")
+
+
+def _degrade_rank_by_identity(best_hit: BlastHit, rank: str):
+    """
+    If identity is too low for the LCA rank, move up to a safer rank.
+    """
+    if rank not in DECISION_RANK_ORDER:
+        return ("N/A", "N/A", "N/A")
+
+    best_identity = _safe_float(best_hit.percent_identity)
+    rank_index = DECISION_RANK_ORDER.index(rank)
+
+    while rank_index >= 0:
+        candidate_rank = DECISION_RANK_ORDER[rank_index]
+        min_identity = MIN_IDENTITY_FOR_RANK.get(candidate_rank, 0.0)
+
+        if best_identity >= min_identity:
+            taxid, name = _get_taxon_at_rank(best_hit, candidate_rank)
+            return (candidate_rank, taxid, name)
+
+        rank_index -= 1
+
+    return ("N/A", "N/A", "N/A")
+
+
+def _get_competing_hits(query_hits: List[BlastHit]):
+    """
+    Retain hits close enough to the top hit that they should be considered
+    competing explanations for the ASV.
+    """
+    if not query_hits:
+        return []
+
+    best_hit = max(query_hits, key=lambda h: h.bit_score)
+    best_identity = _safe_float(best_hit.percent_identity)
+    best_coverage = _safe_float(best_hit.query_coverage)
+
+    competing = []
+
+    for hit in query_hits:
+        identity = _safe_float(hit.percent_identity)
+        coverage = _safe_float(hit.query_coverage)
+
+        if (
+            identity >= best_identity - COMPETING_IDENTITY_WINDOW
+            and coverage >= best_coverage - COMPETING_COVERAGE_WINDOW
+        ):
+            competing.append(hit)
+
+    return competing
+
+
+def _count_unique_taxa(hits: List[BlastHit], rank: str):
+    observed = set()
+
+    for hit in hits:
+        taxid, name = _get_taxon_at_rank(hit, rank)
+
+        if taxid != "N/A":
+            observed.add((str(taxid), name))
+
+    return len(observed)
+
+
+def make_decision_classification(
+    query_hits: List[BlastHit],
+    tree_best_hit: Optional[BlastHit] = None,
+):
+    """
+    Create a decision-level classification using competing BLAST hits,
+    LCA logic, identity thresholds, and tree agreement.
+    """
+    decision = {
+        "best_percent_identity": "N/A",
+        "best_query_coverage": "N/A",
+        "best_bit_score": "N/A",
+        "second_percent_identity": "N/A",
+        "identity_gap": "N/A",
+        "competing_hit_count": 0,
+        "competing_species_count": 0,
+        "competing_genus_count": 0,
+        "competing_family_count": 0,
+        "decision_rank": "N/A",
+        "decision_taxid": "N/A",
+        "decision_name": "N/A",
+        "tree_agrees_with_decision": "N/A",
+        "decision_confidence": "No classification",
+        "decision_reason": "No retained BLAST hits",
+    }
+
+    if not query_hits:
+        return decision
+
+    ranked_hits = sorted(
+        query_hits,
+        key=lambda h: (h.bit_score, h.percent_identity, h.query_coverage),
+        reverse=True,
+    )
+
+    best_hit = ranked_hits[0]
+    second_hit = ranked_hits[1] if len(ranked_hits) > 1 else None
+
+    decision["best_percent_identity"] = f"{best_hit.percent_identity:.3f}"
+    decision["best_query_coverage"] = f"{best_hit.query_coverage:.3f}"
+    decision["best_bit_score"] = f"{best_hit.bit_score:.3f}"
+
+    if second_hit:
+        identity_gap = best_hit.percent_identity - second_hit.percent_identity
+        decision["second_percent_identity"] = f"{second_hit.percent_identity:.3f}"
+        decision["identity_gap"] = f"{identity_gap:.3f}"
+    else:
+        decision["second_percent_identity"] = "N/A"
+        decision["identity_gap"] = "N/A"
+
+    competing_hits = _get_competing_hits(query_hits)
+
+    decision["competing_hit_count"] = len(competing_hits)
+    decision["competing_species_count"] = _count_unique_taxa(competing_hits, "species")
+    decision["competing_genus_count"] = _count_unique_taxa(competing_hits, "genus")
+    decision["competing_family_count"] = _count_unique_taxa(competing_hits, "family")
+
+    lca_rank, lca_taxid, lca_name = _find_lca_rank(competing_hits)
+
+    if lca_rank == "N/A":
+        decision["decision_reason"] = "No shared LCA could be determined among competing hits"
+        decision["decision_confidence"] = "Low"
+        return decision
+
+    decision_rank, decision_taxid, decision_name = _degrade_rank_by_identity(
+        best_hit,
+        lca_rank,
+    )
+
+    decision["decision_rank"] = decision_rank
+    decision["decision_taxid"] = decision_taxid
+    decision["decision_name"] = decision_name
+
+    tree_agrees = "N/A"
+
+    if tree_best_hit and decision_rank != "N/A":
+        tree_taxid, tree_name = _get_taxon_at_rank(tree_best_hit, decision_rank)
+
+        if str(tree_taxid) == str(decision_taxid):
+            tree_agrees = "Yes"
+        else:
+            tree_agrees = "No"
+
+    decision["tree_agrees_with_decision"] = tree_agrees
+    
+    best_species_taxid, best_species_name = _get_taxon_at_rank(best_hit, "species")
+    best_genus_taxid, best_genus_name = _get_taxon_at_rank(best_hit, "genus")
+
+    tree_species_name = "N/A"
+    tree_genus_name = "N/A"
+
+    if tree_best_hit:
+        _tree_species_taxid, tree_species_name = _get_taxon_at_rank(tree_best_hit, "species")
+        _tree_genus_taxid, tree_genus_name = _get_taxon_at_rank(tree_best_hit, "genus")                                                                                         
+    
+    reason_parts = []
+
+    if len(competing_hits) == 1:
+        reason_parts.append(
+            "A single high-quality BLAST match remained after filtering, with no competing taxa meeting the similarity threshold."
+        )
+    else:
+        reason_parts.append(
+            f"{len(competing_hits)} competing BLAST matches remained after filtering."
+        )
+        reason_parts.append(
+            f"These competing hits represent {decision['competing_species_count']} species, "
+            f"{decision['competing_genus_count']} genera, and "
+            f"{decision['competing_family_count']} families."
+        )
+
+    reason_parts.append(
+        f"The best alignment matched {best_species_name} with "
+        f"{best_hit.percent_identity:.2f}% identity and "
+        f"{best_hit.query_coverage:.2f}% query coverage."
+    )
+
+    if lca_rank == decision_rank:
+        reason_parts.append(
+            f"The lowest common ancestor of the competing hits supports a "
+            f"{decision_rank}-level classification: {decision_name}."
+        )
+    else:
+        threshold = MIN_IDENTITY_FOR_RANK.get(lca_rank, "N/A")
+        reason_parts.append(
+            f"The competing hits resolved to {lca_rank}, but the best alignment identity "
+            f"({best_hit.percent_identity:.2f}%) did not meet the {lca_rank}-level "
+            f"confidence threshold ({threshold}%). The classification was therefore "
+            f"reported conservatively at {decision_rank}: {decision_name}."
+        )
+
+    if tree_agrees == "Yes":
+        reason_parts.append(
+            f"The phylogenetic nearest neighbour supports this decision at the "
+            f"{decision_rank} level."
+        )
+    elif tree_agrees == "No":
+        if tree_best_hit:
+            reason_parts.append(
+                f"The phylogenetic nearest neighbour was {tree_species_name} "
+                f"({tree_genus_name}), which does not support the "
+                f"{decision_rank}-level decision of {decision_name}. "
+                f"This indicates disagreement between pairwise alignment and "
+                f"phylogenetic placement."
+            )
+        else:
+            reason_parts.append(
+                "The phylogenetic nearest neighbour did not support this decision."
+            )
+    else:
+        reason_parts.append(
+            "No phylogenetic nearest-neighbour support was available."
+        )
+
+    decision["decision_reason"] = " ".join(reason_parts)
+
+    if tree_agrees == "No":
+        decision["decision_confidence"] = "Low"
+    elif (
+        decision_rank == "species"
+        and decision["competing_species_count"] == 1
+        and tree_agrees in {"Yes", "N/A"}
+    ):
+        decision["decision_confidence"] = "High"
+    elif tree_agrees == "Yes":
+        decision["decision_confidence"] = "Moderate"
+    elif decision_rank in {"genus", "family"}:
+        decision["decision_confidence"] = "Moderate"
+    else:
+        decision["decision_confidence"] = "Low"
+
+    return decision
 
 def generate_classification_summary(
     sequences: dict[str, str],
@@ -660,6 +987,21 @@ def generate_classification_summary(
             'tree_tree_label_taxid': 'N/A',
             'tree_tree_label_name': 'N/A',
             'tree_based_classification': 'No',
+            'best_percent_identity': 'N/A',
+            'best_query_coverage': 'N/A',
+            'best_bit_score': 'N/A',
+            'second_percent_identity': 'N/A',
+            'identity_gap': 'N/A',
+            'competing_hit_count': 0,
+            'competing_species_count': 0,
+            'competing_genus_count': 0,
+            'competing_family_count': 0,
+            'decision_rank': 'N/A',
+            'decision_taxid': 'N/A',
+            'decision_name': 'N/A',
+            'tree_agrees_with_decision': 'N/A',
+            'decision_confidence': 'No classification',
+            'decision_reason': 'No retained BLAST hits',
             'appears_in_multiple_groups': 'No',
             'has_classification': 'Yes'
         }
@@ -724,19 +1066,36 @@ def generate_classification_summary(
                 nearest_neighbor = find_nearest_neighbor_in_tree(tree_file, query_id)
                 
                 if nearest_neighbor:
-                    # Find the BLAST hit corresponding to the nearest neighbor.
-                    # Try exact match first; fall back to normalized comparison to handle
-                    # NCBI format differences and MAFFT _R_ markers.
+                    # First try matching the new taxonomic tree labels created in alignment.py.
+                    tree_label_map = {}
+
                     for hit in query_hits:
-                        if _subject_id_matches(hit.subject_id, nearest_neighbor):
-                            tree_best_hit = hit
-                            classification['tree_based_classification'] = 'Yes'
-                            break
-                    
+                        safe_tree_label = make_safe_taxonomic_tree_label(
+                            hit,
+                            label_rank=tree_label_rank
+                        )
+                        tree_label_map[safe_tree_label] = hit
+
+                        # Also handle MAFFT reverse-complement labels.
+                        tree_label_map[f"_R_{safe_tree_label}"] = hit
+                        tree_label_map[f"{safe_tree_label}_R"] = hit
+
+                    tree_best_hit = tree_label_map.get(nearest_neighbor)
+
+                    # Fall back to old subject-id matching for legacy trees or NCBI-style runs.
+                    if not tree_best_hit:
+                        for hit in query_hits:
+                            if _subject_id_matches(hit.subject_id, nearest_neighbor):
+                                tree_best_hit = hit
+                                break
+
                     if tree_best_hit:
+                        classification['tree_based_classification'] = 'Yes'
                         logger.info(f"Tree-based nearest neighbor for {query_id}: {nearest_neighbor}")
                     else:
-                        logger.debug(f"Tree nearest neighbor {nearest_neighbor} not found in BLAST hits for {query_id}")
+                        logger.debug(
+                            f"Tree nearest neighbor {nearest_neighbor} not found in BLAST hits for {query_id}"
+                        )
         
         # Populate tree-based classification if available
         if tree_best_hit:
@@ -795,6 +1154,13 @@ def generate_classification_summary(
                 classification['blast_group_name'] = '; '.join(sorted(group_names))
                 classification['blast_group_taxid'] = '; '.join(sorted(group_taxids))
         
+        decision = make_decision_classification(
+            query_hits=query_hits,
+            tree_best_hit=tree_best_hit,
+        )
+
+        classification.update(decision)
+        
         summary_data.append(classification)
     
     # Write TSV file
@@ -826,6 +1192,21 @@ def generate_classification_summary(
                 'tree_tree_label_taxid',
                 'tree_tree_label_name',
                 'appears_in_multiple_groups',
+                'best_percent_identity',
+                'best_query_coverage',
+                'best_bit_score',
+                'second_percent_identity',
+                'identity_gap',
+                'competing_hit_count',
+                'competing_species_count',
+                'competing_genus_count',
+                'competing_family_count',
+                'decision_rank',
+                'decision_taxid',
+                'decision_name',
+                'tree_agrees_with_decision',
+                'decision_confidence',
+                'decision_reason',
                 'has_classification'
             ]
             f.write('\t'.join(headers) + '\n')
@@ -857,6 +1238,21 @@ def generate_classification_summary(
                     entry['tree_tree_label_taxid'],
                     entry['tree_tree_label_name'],
                     entry['appears_in_multiple_groups'],
+                    str(entry['best_percent_identity']),
+                    str(entry['best_query_coverage']),
+                    str(entry['best_bit_score']),
+                    str(entry['second_percent_identity']),
+                    str(entry['identity_gap']),
+                    str(entry['competing_hit_count']),
+                    str(entry['competing_species_count']),
+                    str(entry['competing_genus_count']),
+                    str(entry['competing_family_count']),
+                    entry['decision_rank'],
+                    str(entry['decision_taxid']),
+                    entry['decision_name'],
+                    entry['tree_agrees_with_decision'],
+                    entry['decision_confidence'],
+                    entry['decision_reason'],
                     entry['has_classification']
                 ]
                 f.write('\t'.join(row) + '\n')
@@ -865,5 +1261,5 @@ def generate_classification_summary(
         return True
         
     except Exception as e:
-        logger.error(f"Error writing classification summary TSV: {e}")
+        logger.exception(f"Error writing classification summary TSV: {e}")
         return False
