@@ -20,7 +20,14 @@ from .ncbi_download import (
     setup_mmseqs_taxonomy,
     check_available_memory_gb
 )
-from .blast_analysis import run_blast_search, run_mmseqs_search, validate_mmseqs_memory_limit, FastaReader
+from .blast_analysis import (
+    run_blast_search,
+    run_mmseqs_search,
+    validate_mmseqs_memory_limit,
+    FastaReader,
+    BlastRunner,
+    MMseqs2Runner,
+)
 from .taxonomy import (
     process_blast_results_for_taxonomy,
     rewrite_blast_hits,
@@ -239,6 +246,24 @@ def _write_backend_search_metadata(args, mmseqs_database: str) -> None:
             database_source=args.blast_db_source or args.database
         )
 
+def _parse_raw_search_hits(args, search_output: Path) -> list:
+    """
+    Parse raw BLAST/MMseqs hits before identity/coverage filtering.
+    """
+    try:
+        if args.search_tool == "mmseqs2":
+            runner = MMseqs2Runner(args.mmseqs_db_path)
+            raw_hits = runner.parse_mmseqs_results(search_output)
+        else:
+            runner = BlastRunner(blastdb_path=args.blastdb_path)
+            raw_hits = runner.parse_blast_results(search_output)
+
+        logger.info(f"Parsed {len(raw_hits)} raw search hits for classification context")
+        return raw_hits
+
+    except Exception as e:
+        logger.warning(f"Could not parse raw search hits for classification context: {e}")
+        return []
 
 def download_command(args):
     """Handle the download subcommand."""
@@ -447,7 +472,9 @@ def blast_command(args):
     # CLI args.
     if search_ran:
         _write_backend_search_metadata(args, mmseqs_database)
-
+    
+    raw_blast_hits = _parse_raw_search_hits(args, search_output)
+    
     # Step 3: Group hits by query and display summary
     logger.info("\n[Step 3/5] Analyzing search results...")
     hits_by_query = defaultdict(int)
@@ -610,9 +637,10 @@ def blast_command(args):
             blast_hits=filtered_hits,
             output_file=args.output_classification,
             rank=args.rank,
-            group_rank=args.rank,  # For individual workflow, group_rank same as rank
+            group_rank=args.rank,
             tree_label_rank=args.tree_label_rank,
-            tree_files=tree_files_map if tree_files_map else None
+            tree_files=tree_files_map if tree_files_map else None,
+            raw_blast_hits=raw_blast_hits,
         )
         
         print("DEBUG classification success:", success)
@@ -898,7 +926,9 @@ def grouped_command(args):
     # CLI args.
     if search_ran:
         _write_backend_search_metadata(args, mmseqs_database)
-
+    
+    raw_blast_hits = _parse_raw_search_hits(args, search_output)
+    
     # Step 3: Process taxonomy information
     logger.info(f"\n[Step 3/9] Processing taxonomy information (rank: {args.rank})...")
     
@@ -1114,7 +1144,8 @@ def grouped_command(args):
             rank=args.rank,
             group_rank=args.group_rank,
             tree_label_rank=args.tree_label_rank,
-            tree_files=tree_files_map if tree_files_map else None
+            tree_files=tree_files_map if tree_files_map else None,
+            raw_blast_hits=raw_blast_hits,
         )
         
         if success:

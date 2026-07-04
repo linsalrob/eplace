@@ -640,6 +640,96 @@ def _get_taxon_at_rank(hit: BlastHit, rank: str):
     return ("N/A", "N/A")
 
 
+def _format_optional_float(value, digits: int = 3):
+    """
+    Format numeric values for classification.tsv while preserving N/A.
+    """
+    if value in (None, "N/A", ""):
+        return "N/A"
+
+    try:
+        return f"{float(value):.{digits}f}"
+    except Exception:
+        return "N/A"
+
+
+def _lineage_for_hit(hit: Optional[BlastHit]):
+    """
+    Return the standard semicolon-delimited lineage string for a BLAST hit.
+    """
+    if not hit or not hit.subject_taxonomy:
+        return ";;;;;"
+
+    return ";".join([
+        hit.subject_taxonomy[r][1] if r in hit.subject_taxonomy else ""
+        for r in VALID_RANKS
+        if r != "no_rank"
+    ])
+
+
+def _annotate_hits_with_taxonomy_if_needed(hits: List[BlastHit]):
+    """
+    Attach taxonomy dictionaries to raw/unfiltered hits when taxids are available.
+    """
+    missing_taxids = {
+        hit.subject_taxid
+        for hit in hits
+        if not hit.subject_taxonomy
+        and hit.subject_taxid not in (None, "", "0", "N/A")
+    }
+
+    if not missing_taxids:
+        return
+
+    tax_extractor = TaxonomyExtractor()
+    tax_dict = tax_extractor.parse_taxids(list(missing_taxids))
+
+    for hit in hits:
+        if not hit.subject_taxonomy:
+            hit.subject_taxonomy = tax_dict.get(hit.subject_taxid)
+
+
+def make_raw_blast_evidence(
+    raw_hits: List[BlastHit],
+    retained_hits: List[BlastHit],
+):
+    """
+    Summarise raw search evidence for one query.
+
+    This distinguishes true no-hit reads from reads that had weak/subthreshold
+    BLAST/MMseqs evidence but no retained hits after filtering.
+    """
+    evidence = {
+        "raw_search_hits": 0,
+        "raw_best_percent_identity": "N/A",
+        "raw_best_query_coverage": "N/A",
+        "raw_best_bit_score": "N/A",
+        "raw_best_subject_id": "N/A",
+        "raw_best_taxonomy": ";;;;;",
+        "raw_evidence_status": "no_detectable_match",
+    }
+
+    if not raw_hits:
+        return evidence
+
+    best_hit = max(
+        raw_hits,
+        key=lambda h: (h.bit_score, h.percent_identity, h.query_coverage),
+    )
+
+    evidence.update({
+        "raw_search_hits": len(raw_hits),
+        "raw_best_percent_identity": _format_optional_float(best_hit.percent_identity),
+        "raw_best_query_coverage": _format_optional_float(best_hit.query_coverage),
+        "raw_best_bit_score": _format_optional_float(best_hit.bit_score),
+        "raw_best_subject_id": best_hit.subject_id,
+        "raw_best_taxonomy": _lineage_for_hit(best_hit),
+        "raw_evidence_status": "retained_match" if retained_hits else "subthreshold_match",
+    })
+
+    return evidence
+
+
 def _find_lca_rank(hits: List[BlastHit]):
     """
     Find the lowest shared taxonomic rank among competing hits.
@@ -909,7 +999,8 @@ def generate_classification_summary(
     rank: str = "genus",
     group_rank: str = "class",
     tree_label_rank: str = "genus",
-    tree_files: Optional[dict[str, Path]] = None
+    tree_files: Optional[dict[str, Path]] = None,
+    raw_blast_hits: Optional[List[BlastHit]] = None,
 ) -> bool:
     """
     Generate a classification summary TSV file for each query sequence.
@@ -948,10 +1039,20 @@ def generate_classification_summary(
             logger.error(f"{r_name}: {r} is not a valid rank. It must be one of: {VALID_RANKS}")
             return False
     
-    # Group hits by query
+    if raw_blast_hits is None:
+        raw_blast_hits = blast_hits
+
+    _annotate_hits_with_taxonomy_if_needed(raw_blast_hits)
+
+    # Group retained hits by query
     query_hits_map = defaultdict(list)
     for hit in blast_hits:
         query_hits_map[hit.query_id].append(hit)
+
+    # Group raw/unfiltered hits by query
+    raw_hits_map = defaultdict(list)
+    for hit in raw_blast_hits:
+        raw_hits_map[hit.query_id].append(hit)
     
     # Collect all query IDs that were searched
     all_query_ids = set(sequences.keys())
@@ -961,6 +1062,7 @@ def generate_classification_summary(
     
     for query_id in sorted(all_query_ids, key=sort_strings_and_numbers):
         query_hits = query_hits_map.get(query_id, [])
+        raw_query_hits = raw_hits_map.get(query_id, [])
         
         # Initialize classification info
         classification = {
@@ -1002,13 +1104,38 @@ def generate_classification_summary(
             'tree_agrees_with_decision': 'N/A',
             'decision_confidence': 'No classification',
             'decision_reason': 'No retained BLAST hits',
+            'raw_search_hits': 0,
+            'raw_best_percent_identity': 'N/A',
+            'raw_best_query_coverage': 'N/A',
+            'raw_best_bit_score': 'N/A',
+            'raw_best_subject_id': 'N/A',
+            'raw_best_taxonomy': ';;;;;',
+            'raw_evidence_status': 'no_detectable_match',
             'appears_in_multiple_groups': 'No',
             'has_classification': 'Yes'
         }
         
+        raw_evidence = make_raw_blast_evidence(
+            raw_hits=raw_query_hits,
+            retained_hits=query_hits,
+        )
+        classification.update(raw_evidence)
+        
         if not query_hits:
-            # No hits for this query
+            # No retained hits for this query
             classification['has_classification'] = 'No'
+
+            if raw_query_hits:
+                classification['decision_confidence'] = 'No retained classification'
+                classification['decision_reason'] = (
+                    "No BLAST hits passed the retained-hit filtering thresholds, "
+                    f"but {classification['raw_search_hits']} raw search hits were present. "
+                    f"The best raw hit was {classification['raw_best_subject_id']} "
+                    f"with {classification['raw_best_percent_identity']}% identity and "
+                    f"{classification['raw_best_query_coverage']}% query coverage. "
+                    "Treat this as weak/subthreshold database evidence rather than a complete absence of signal."
+                )
+
             summary_data.append(classification)
             continue
 
@@ -1207,6 +1334,13 @@ def generate_classification_summary(
                 'tree_agrees_with_decision',
                 'decision_confidence',
                 'decision_reason',
+                'raw_search_hits',
+                'raw_best_percent_identity',
+                'raw_best_query_coverage',
+                'raw_best_bit_score',
+                'raw_best_subject_id',
+                'raw_best_taxonomy',
+                'raw_evidence_status',
                 'has_classification'
             ]
             f.write('\t'.join(headers) + '\n')
@@ -1253,6 +1387,13 @@ def generate_classification_summary(
                     entry['tree_agrees_with_decision'],
                     entry['decision_confidence'],
                     entry['decision_reason'],
+                    str(entry['raw_search_hits']),
+                    entry['raw_best_percent_identity'],
+                    entry['raw_best_query_coverage'],
+                    entry['raw_best_bit_score'],
+                    entry['raw_best_subject_id'],
+                    entry['raw_best_taxonomy'],
+                    entry['raw_evidence_status'],
                     entry['has_classification']
                 ]
                 f.write('\t'.join(row) + '\n')
