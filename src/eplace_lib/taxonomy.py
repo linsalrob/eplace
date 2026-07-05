@@ -639,6 +639,269 @@ def _get_taxon_at_rank(hit: BlastHit, rank: str):
         return hit.subject_taxonomy[rank]
     return ("N/A", "N/A")
 
+def _safe_tree_label(label: str):
+    """
+    Match the label cleaning used for tree tips.
+    """
+    if label is None:
+        return ""
+
+    return (
+        str(label)
+        .replace(" ", "_")
+        .replace(":", "_")
+        .replace("(", "_")
+        .replace(")", "_")
+        .replace(",", "_")
+        .replace(";", "_")
+        .replace("|", "_")
+        .replace("/", "_")
+    )
+
+
+def _split_newick_top_level(text: str):
+    """
+    Split a Newick subtree string on commas that are not inside parentheses.
+    """
+    parts = []
+    depth = 0
+    start = 0
+
+    for i, char in enumerate(text):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+
+    parts.append(text[start:])
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _strip_branch_length(newick_part: str):
+    """
+    Remove a terminal branch length from a Newick token.
+    """
+    depth = 0
+
+    for i, char in enumerate(newick_part):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == ":" and depth == 0:
+            return newick_part[:i]
+
+    return newick_part
+
+
+def _collect_tip_labels(newick_part: str):
+    """
+    Collect tip labels from a simple Newick subtree.
+    """
+    labels = []
+    token = ""
+
+    for char in newick_part:
+        if char in "(),:;":
+            if token:
+                labels.append(token)
+                token = ""
+        else:
+            token += char
+
+    if token:
+        labels.append(token)
+
+    # Remove obvious numeric branch support labels.
+    cleaned = []
+    for label in labels:
+        label = label.strip()
+        if not label:
+            continue
+        try:
+            float(label)
+            continue
+        except ValueError:
+            cleaned.append(label)
+
+    return cleaned
+
+
+def _find_query_sister_tip_labels(tree_file: Path, query_id: str):
+    """
+    Find labels in the smallest immediate sister neighbourhood around query_id.
+
+    This is intentionally simple for Milestone 2. It finds the smallest
+    parenthesized Newick subtree containing the query, then returns all other
+    tip labels in that subtree.
+    """
+    if not tree_file or not tree_file.exists():
+        return [], "No tree", "No phylogenetic tree was available."
+
+    tree_text = tree_file.read_text().strip()
+
+    query_label = _safe_tree_label(query_id)
+
+    if query_id not in tree_text and query_label not in tree_text:
+        return [], "Query not found", "Query was not found in the phylogenetic tree."
+
+    search_label = query_id if query_id in tree_text else query_label
+    query_pos = tree_text.find(search_label)
+
+    # Walk left to find the nearest opening parenthesis that contains the query.
+    left = query_pos
+    while left >= 0:
+        if tree_text[left] == "(":
+            break
+        left -= 1
+
+    if left < 0:
+        return [], "No reference sister clade", "Could not identify a parent subtree for the query."
+
+    # Walk right to the matching closing parenthesis.
+    depth = 0
+    right = None
+    for i in range(left, len(tree_text)):
+        if tree_text[i] == "(":
+            depth += 1
+        elif tree_text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                right = i
+                break
+
+    if right is None:
+        return [], "No reference sister clade", "Could not identify a complete parent subtree for the query."
+
+    subtree = tree_text[left + 1:right]
+    tips = _collect_tip_labels(subtree)
+
+    sister_tips = [
+        tip for tip in tips
+        if tip not in {query_id, query_label, f"_R_{query_label}", f"{query_label}_R"}
+    ]
+
+    if not sister_tips:
+        return [], "No reference sister clade", "No sister reference tips were found near the query."
+
+    return sister_tips, "Tree neighbourhood found", "A local sister neighbourhood was found for the query."
+
+
+def _match_tree_label_to_hit(label: str, query_hits: List[BlastHit], tree_label_rank: str):
+    """
+    Match a tree tip label back to a BlastHit.
+    """
+    label_options = {label}
+
+    if label.startswith("_R_"):
+        label_options.add(label[3:])
+    if label.endswith("_R"):
+        label_options.add(label[:-2])
+
+    for hit in query_hits:
+        possible_labels = {
+            hit.subject_id,
+            hit.get_accession(),
+            _safe_tree_label(hit.subject_id),
+            _safe_tree_label(hit.get_accession()),
+        }
+
+        if hit.subject_taxonomy and tree_label_rank in hit.subject_taxonomy:
+            taxid, name = hit.subject_taxonomy[tree_label_rank]
+            possible_labels.add(_safe_tree_label(f"{taxid}_{name}"))
+
+        if label_options & possible_labels:
+            return hit
+
+    return None
+
+
+def make_tree_topology_evidence(
+    tree_file: Optional[Path],
+    query_id: str,
+    query_hits: List[BlastHit],
+    tree_label_rank: str,
+):
+    """
+    Summarise topology-based evidence from the local tree neighbourhood.
+    """
+    evidence = {
+        "tree_nearest_neighbor_label": "N/A",
+        "tree_sister_reference_count": 0,
+        "tree_sister_taxa": "N/A",
+        "tree_lowest_consistent_rank": "N/A",
+        "tree_lowest_consistent_taxid": "N/A",
+        "tree_lowest_consistent_name": "N/A",
+        "tree_topology_status": "No tree",
+        "tree_topology_reason": "No phylogenetic tree was available.",
+    }
+
+    if not tree_file:
+        return evidence
+
+    sister_labels, status, reason = _find_query_sister_tip_labels(tree_file, query_id)
+    evidence["tree_topology_status"] = status
+    evidence["tree_topology_reason"] = reason
+
+    sister_hits = []
+    first_reference_label = "N/A"
+
+    for label in sister_labels:
+        hit = _match_tree_label_to_hit(label, query_hits, tree_label_rank)
+        if hit:
+            sister_hits.append(hit)
+            if first_reference_label == "N/A":
+                first_reference_label = label
+
+    evidence["tree_nearest_neighbor_label"] = first_reference_label
+
+    if not sister_hits:
+        evidence["tree_topology_status"] = "No reference sister clade"
+        evidence["tree_topology_reason"] = (
+            "Tree neighbours were found, but none could be mapped back to retained BLAST reference hits."
+        )
+        return evidence
+
+    evidence["tree_sister_reference_count"] = len(sister_hits)
+
+    taxa = []
+    for hit in sister_hits:
+        taxid, name = _get_taxon_at_rank(hit, tree_label_rank)
+        if name != "N/A":
+            taxa.append(name)
+        else:
+            taxa.append(hit.subject_id)
+
+    evidence["tree_sister_taxa"] = "; ".join(sorted(set(taxa)))
+
+    lca_rank, lca_taxid, lca_name = _find_lca_rank(sister_hits)
+    evidence["tree_lowest_consistent_rank"] = lca_rank
+    evidence["tree_lowest_consistent_taxid"] = lca_taxid
+    evidence["tree_lowest_consistent_name"] = lca_name
+
+    if lca_rank == "N/A":
+        evidence["tree_topology_status"] = "Mixed topology"
+        evidence["tree_topology_reason"] = (
+            f"The query's sister neighbourhood contains {len(sister_hits)} mapped reference tips, "
+            "but they do not share a consistent taxonomic rank."
+        )
+    elif len(sister_hits) == 1:
+        evidence["tree_topology_status"] = "Single reference neighbour"
+        evidence["tree_topology_reason"] = (
+            f"The query's sister neighbourhood contains one mapped reference tip: "
+            f"{evidence['tree_sister_taxa']}."
+        )
+    else:
+        evidence["tree_topology_status"] = "Consistent topology"
+        evidence["tree_topology_reason"] = (
+            f"The query's sister neighbourhood contains {len(sister_hits)} mapped reference tips "
+            f"sharing {lca_rank}: {lca_name}."
+        )
+
+    return evidence
 
 def _format_optional_float(value, digits: int = 3):
     """
@@ -1104,6 +1367,14 @@ def generate_classification_summary(
             'tree_agrees_with_decision': 'N/A',
             'decision_confidence': 'No classification',
             'decision_reason': 'No retained BLAST hits',
+            'tree_nearest_neighbor_label': 'N/A',
+            'tree_sister_reference_count': 0,
+            'tree_sister_taxa': 'N/A',
+            'tree_lowest_consistent_rank': 'N/A',
+            'tree_lowest_consistent_taxid': 'N/A',
+            'tree_lowest_consistent_name': 'N/A',
+            'tree_topology_status': 'No tree',
+            'tree_topology_reason': 'No phylogenetic tree was available.',
             'raw_search_hits': 0,
             'raw_best_percent_identity': 'N/A',
             'raw_best_query_coverage': 'N/A',
@@ -1191,6 +1462,14 @@ def generate_classification_summary(
                 from .alignment import find_nearest_neighbor_in_tree
                 
                 nearest_neighbor = find_nearest_neighbor_in_tree(tree_file, query_id)
+                
+                tree_topology_evidence = make_tree_topology_evidence(
+                    tree_file=tree_file,
+                    query_id=query_id,
+                    query_hits=query_hits,
+                    tree_label_rank=tree_label_rank,
+                )
+                classification.update(tree_topology_evidence)
                 
                 if nearest_neighbor:
                     # First try matching the new taxonomic tree labels created in alignment.py.
@@ -1334,6 +1613,14 @@ def generate_classification_summary(
                 'tree_agrees_with_decision',
                 'decision_confidence',
                 'decision_reason',
+                'tree_nearest_neighbor_label',
+                'tree_sister_reference_count',
+                'tree_sister_taxa',
+                'tree_lowest_consistent_rank',
+                'tree_lowest_consistent_taxid',
+                'tree_lowest_consistent_name',
+                'tree_topology_status',
+                'tree_topology_reason',
                 'raw_search_hits',
                 'raw_best_percent_identity',
                 'raw_best_query_coverage',
@@ -1387,6 +1674,14 @@ def generate_classification_summary(
                     entry['tree_agrees_with_decision'],
                     entry['decision_confidence'],
                     entry['decision_reason'],
+                    entry['tree_nearest_neighbor_label'],
+                    str(entry['tree_sister_reference_count']),
+                    entry['tree_sister_taxa'],
+                    entry['tree_lowest_consistent_rank'],
+                    str(entry['tree_lowest_consistent_taxid']),
+                    entry['tree_lowest_consistent_name'],
+                    entry['tree_topology_status'],
+                    entry['tree_topology_reason'],
                     str(entry['raw_search_hits']),
                     entry['raw_best_percent_identity'],
                     entry['raw_best_query_coverage'],
