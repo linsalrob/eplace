@@ -122,6 +122,7 @@ class QueryPlacementPlan:
             "placement_best_subject_id": (
                 self.best_tree_hit.subject_id if self.best_tree_hit else "N/A"
             ),
+            "placement_best_taxon_name": _best_taxon_name(self.best_tree_hit),
             "phylogenetic_placement_attempted": self.phylogenetic_placement_attempted,
             "phylogenetic_placement_reason": self.reason,
         }
@@ -136,7 +137,25 @@ def _format_hit_float(hit: Optional[BlastHit], attr: str, digits: int = 3) -> st
     except Exception:
         return "N/A"
 
+def _best_taxon_name(hit: Optional[BlastHit]) -> str:
+    """
+    Return the most informative readable taxon name for a placement hit.
 
+    Preference order:
+    species > genus > family > order > class > phylum > domain > subject_id
+    """
+    if hit is None:
+        return "N/A"
+
+    if getattr(hit, "subject_taxonomy", None):
+        for rank in ["species", "genus", "family", "order", "class", "phylum", "domain"]:
+            if rank in hit.subject_taxonomy:
+                _taxid, name = hit.subject_taxonomy[rank]
+                if name:
+                    return name
+
+    return getattr(hit, "subject_id", "N/A")
+    
 def _group_hits_by_query(hits: Iterable[BlastHit]) -> Dict[str, List[BlastHit]]:
     """Group BlastHit objects by query_id."""
     grouped: Dict[str, List[BlastHit]] = defaultdict(list)

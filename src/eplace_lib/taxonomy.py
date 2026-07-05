@@ -1391,6 +1391,7 @@ def generate_classification_summary(
             'placement_best_query_coverage': 'N/A',
             'placement_best_bit_score': 'N/A',
             'placement_best_subject_id': 'N/A',
+            'placement_best_taxon_name': 'N/A',
             'phylogenetic_placement_attempted': 'No',
             'phylogenetic_placement_reason': 'No placement plan was available.',
             'appears_in_multiple_groups': 'No',
@@ -1436,44 +1437,57 @@ def generate_classification_summary(
 
         classification['blast_hits'] = len(query_hits)
 
-        # Get the best BLAST hit (highest bit score) for BLAST-based classification
-        blast_best_hit = max(query_hits, key=lambda h: h.bit_score)
-        
-        # Populate BLAST-based classification
-        if blast_best_hit.subject_taxonomy:
-            classification['taxonomy_blast'] = ';'.join([blast_best_hit.subject_taxonomy[r][1] if r in blast_best_hit.subject_taxonomy else ""
-                                                   for r in VALID_RANKS if r != 'no_rank'])
-        elif rank == 'no_rank':
-            # In no_rank mode, use subject_id instead of taxonomy
-            classification['taxonomy_blast'] = blast_best_hit.subject_id
-            classification['blast_classification_taxid'] = blast_best_hit.subject_id
-            classification['blast_classification_name'] = blast_best_hit.subject_id
-        
-        # Extract BLAST-based classification at different ranks
+        # Extract BLAST-based classification only when retained hits exist.
+        # Placement-hit queries may have tree_context_hits but zero retained hits,
+        # so do not call max(query_hits) unless query_hits is non-empty.
+        blast_best_hit = None
         blast_missing_ranks = []
-        
-        # Skip taxonomy-based classification when in no_rank mode
-        if rank != 'no_rank':
-            if blast_best_hit.subject_taxonomy and rank in blast_best_hit.subject_taxonomy:
-                taxid, name = blast_best_hit.subject_taxonomy[rank]
-                classification['blast_classification_taxid'] = taxid
-                classification['blast_classification_name'] = name
-            else:
-                blast_missing_ranks.append(rank)
+
+        if query_hits:
+            # Get the best retained BLAST hit (highest bit score) for strict BLAST-based classification
+            blast_best_hit = max(query_hits, key=lambda h: h.bit_score)
             
-            if blast_best_hit.subject_taxonomy and group_rank in blast_best_hit.subject_taxonomy:
-                taxid, name = blast_best_hit.subject_taxonomy[group_rank]
-                classification['blast_group_taxid'] = taxid
-                classification['blast_group_name'] = name
-            else:
-                blast_missing_ranks.append(group_rank)
+            # Populate BLAST-based classification
+            if blast_best_hit.subject_taxonomy:
+                classification['taxonomy_blast'] = ';'.join([
+                    blast_best_hit.subject_taxonomy[r][1]
+                    if r in blast_best_hit.subject_taxonomy else ""
+                    for r in VALID_RANKS
+                    if r != 'no_rank'
+                ])
+            elif rank == 'no_rank':
+                # In no_rank mode, use subject_id instead of taxonomy
+                classification['taxonomy_blast'] = blast_best_hit.subject_id
+                classification['blast_classification_taxid'] = blast_best_hit.subject_id
+                classification['blast_classification_name'] = blast_best_hit.subject_id
             
-            if blast_best_hit.subject_taxonomy and tree_label_rank in blast_best_hit.subject_taxonomy:
-                taxid, name = blast_best_hit.subject_taxonomy[tree_label_rank]
-                classification['blast_tree_label_taxid'] = taxid
-                classification['blast_tree_label_name'] = name
-            else:
-                blast_missing_ranks.append(tree_label_rank)
+            # Skip taxonomy-based classification when in no_rank mode
+            if rank != 'no_rank':
+                if blast_best_hit.subject_taxonomy and rank in blast_best_hit.subject_taxonomy:
+                    taxid, name = blast_best_hit.subject_taxonomy[rank]
+                    classification['blast_classification_taxid'] = taxid
+                    classification['blast_classification_name'] = name
+                else:
+                    blast_missing_ranks.append(rank)
+                
+                if blast_best_hit.subject_taxonomy and group_rank in blast_best_hit.subject_taxonomy:
+                    taxid, name = blast_best_hit.subject_taxonomy[group_rank]
+                    classification['blast_group_taxid'] = taxid
+                    classification['blast_group_name'] = name
+                else:
+                    blast_missing_ranks.append(group_rank)
+                
+                if blast_best_hit.subject_taxonomy and tree_label_rank in blast_best_hit.subject_taxonomy:
+                    taxid, name = blast_best_hit.subject_taxonomy[tree_label_rank]
+                    classification['blast_tree_label_taxid'] = taxid
+                    classification['blast_tree_label_name'] = name
+                else:
+                    blast_missing_ranks.append(tree_label_rank)
+        else:
+            # No retained BLAST hits. This query may still have placement hits,
+            # but it does not have a strict BLAST classification.
+            if rank != 'no_rank':
+                blast_missing_ranks.extend([rank, group_rank, tree_label_rank])
         
         # Try to get tree-based classification
         tree_best_hit = None
@@ -1658,6 +1672,7 @@ def generate_classification_summary(
                 'placement_best_query_coverage',
                 'placement_best_bit_score',
                 'placement_best_subject_id',
+                'placement_best_taxon_name',
                 'phylogenetic_placement_attempted',
                 'phylogenetic_placement_reason',
                 'has_classification'
@@ -1727,6 +1742,7 @@ def generate_classification_summary(
                     entry['placement_best_query_coverage'],
                     entry['placement_best_bit_score'],
                     entry['placement_best_subject_id'],
+                    entry['placement_best_taxon_name'],
                     entry['phylogenetic_placement_attempted'],
                     entry['phylogenetic_placement_reason'],
                     entry['has_classification']
