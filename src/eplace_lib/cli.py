@@ -571,8 +571,6 @@ def blast_command(args):
         
         # Group placement-eligible hits by query for processing
         hits_by_query_map = group_tree_hits_by_query(placement_plan)
-        for query_id, query_hits in hits_by_query_map.items():
-            hits_by_query_map[hit.query_id].append(hit)
         
         # Process all queries to do trimming and alignment
         # and start tree building in background

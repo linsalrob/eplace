@@ -1403,8 +1403,16 @@ def generate_classification_summary(
         )
         classification.update(raw_evidence)
         
+        placement_query_hits = []
         if placement_plan and query_id in placement_plan:
-            classification.update(placement_plan[query_id].to_summary_fields())
+            query_placement_plan = placement_plan[query_id]
+            classification.update(query_placement_plan.to_summary_fields())
+            placement_query_hits = query_placement_plan.tree_hits
+
+        # Hits used for tree interpretation. Retained hits remain the evidence
+        # for strict BLAST classification, but placement hits can still support
+        # phylogenetic neighbourhood reporting.
+        tree_context_hits = query_hits if query_hits else placement_query_hits
             
         if not query_hits:
             # No retained hits for this query
@@ -1421,8 +1429,10 @@ def generate_classification_summary(
                     "Treat this as weak/subthreshold database evidence rather than a complete absence of signal."
                 )
 
-            summary_data.append(classification)
-            continue
+            # Do not continue yet if placement/tree context exists.
+            if not tree_context_hits:
+                summary_data.append(classification)
+                continue
 
         classification['blast_hits'] = len(query_hits)
 
@@ -1480,7 +1490,7 @@ def generate_classification_summary(
                 tree_topology_evidence = make_tree_topology_evidence(
                     tree_file=tree_file,
                     query_id=query_id,
-                    query_hits=query_hits,
+                    query_hits=tree_context_hits,
                     tree_label_rank=tree_label_rank,
                 )
                 classification.update(tree_topology_evidence)
@@ -1489,7 +1499,7 @@ def generate_classification_summary(
                     # First try matching the new taxonomic tree labels created in alignment.py.
                     tree_label_map = {}
 
-                    for hit in query_hits:
+                    for hit in tree_context_hits:
                         safe_tree_label = make_safe_taxonomic_tree_label(
                             hit,
                             label_rank=tree_label_rank
@@ -1504,7 +1514,7 @@ def generate_classification_summary(
 
                     # Fall back to old subject-id matching for legacy trees or NCBI-style runs.
                     if not tree_best_hit:
-                        for hit in query_hits:
+                        for hit in tree_context_hits:
                             if _subject_id_matches(hit.subject_id, nearest_neighbor):
                                 tree_best_hit = hit
                                 break
@@ -1711,6 +1721,14 @@ def generate_classification_summary(
                     entry['raw_best_subject_id'],
                     entry['raw_best_taxonomy'],
                     entry['raw_evidence_status'],
+                    entry['placement_route'],
+                    str(entry['placement_hit_count']),
+                    entry['placement_best_percent_identity'],
+                    entry['placement_best_query_coverage'],
+                    entry['placement_best_bit_score'],
+                    entry['placement_best_subject_id'],
+                    entry['phylogenetic_placement_attempted'],
+                    entry['phylogenetic_placement_reason'],
                     entry['has_classification']
                 ]
                 f.write('\t'.join(row) + '\n')
