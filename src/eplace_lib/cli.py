@@ -43,6 +43,14 @@ from .alignment import (
     concatenate_all_groups_and_build_tree
 )
 
+from .placement import (
+    PlacementThresholds,
+    build_query_placement_plan,
+    collect_tree_candidate_hits,
+    group_tree_hits_by_query,
+    placement_plan_summary_counts,
+)
+
 # Configure logging (level is overridden at runtime via --log-level)
 RANK_CHOICES = ['phylum', 'class', 'order', 'family', 'genus', 'species', 'no_rank']
 logging.basicConfig(
@@ -265,6 +273,36 @@ def _parse_raw_search_hits(args, search_output: Path) -> list:
         logger.warning(f"Could not parse raw search hits for classification context: {e}")
         return []
 
+def _build_placement_plan_from_args(args, sequences, filtered_hits, raw_blast_hits):
+    """
+    Build query-level placement routes from strict retained hits and raw search hits.
+    """
+    thresholds = PlacementThresholds(
+        classification_min_identity=args.min_identity,
+        classification_min_coverage=args.min_coverage,
+        placement_min_identity=args.placement_min_identity,
+        placement_min_coverage=args.placement_min_coverage,
+        rescue_min_identity=args.rescue_min_identity,
+        rescue_min_coverage=args.rescue_min_coverage,
+    )
+
+    placement_plan = build_query_placement_plan(
+        sequences=sequences,
+        retained_hits=filtered_hits,
+        raw_hits=raw_blast_hits,
+        thresholds=thresholds,
+        max_placement_hits_per_query=args.max_placement_hits_per_query,
+        max_rescue_hits_per_query=args.max_rescue_hits_per_query,
+        backbone_available=False,
+    )
+
+    route_counts = placement_plan_summary_counts(placement_plan)
+    logger.info("Placement route summary:")
+    for route, count in sorted(route_counts.items()):
+        logger.info(f"  {route}: {count}")
+
+    return placement_plan
+
 def download_command(args):
     """Handle the download subcommand."""
     logger.info("=" * 60)
@@ -475,6 +513,15 @@ def blast_command(args):
     
     raw_blast_hits = _parse_raw_search_hits(args, search_output)
     
+    placement_plan = _build_placement_plan_from_args(
+        args=args,
+        sequences=sequences,
+        filtered_hits=filtered_hits,
+        raw_blast_hits=raw_blast_hits,
+    )
+
+    tree_candidate_hits = collect_tree_candidate_hits(placement_plan)
+    
     # Step 3: Group hits by query and display summary
     logger.info("\n[Step 3/5] Analyzing search results...")
     hits_by_query = defaultdict(int)
@@ -489,7 +536,7 @@ def blast_command(args):
     
     try:
         results = process_blast_results_for_taxonomy(
-            blast_hits=filtered_hits,
+            blast_hits=tree_candidate_hits,
             output_dir=args.output_dir,
             rank=args.rank,
             database=args.database,
@@ -522,9 +569,9 @@ def blast_command(args):
     if not args.skip_alignment:
         logger.info("\n[Step 5/5] Aligning sequences and building phylogenetic trees...")
         
-        # Group hits by query for processing
-        hits_by_query_map = defaultdict(list)
-        for hit in filtered_hits:
+        # Group placement-eligible hits by query for processing
+        hits_by_query_map = group_tree_hits_by_query(placement_plan)
+        for query_id, query_hits in hits_by_query_map.items():
             hits_by_query_map[hit.query_id].append(hit)
         
         # Process all queries to do trimming and alignment
@@ -641,6 +688,7 @@ def blast_command(args):
             tree_label_rank=args.tree_label_rank,
             tree_files=tree_files_map if tree_files_map else None,
             raw_blast_hits=raw_blast_hits,
+            placement_plan=placement_plan,
         )
         
         print("DEBUG classification success:", success)
@@ -929,12 +977,21 @@ def grouped_command(args):
     
     raw_blast_hits = _parse_raw_search_hits(args, search_output)
     
+    placement_plan = _build_placement_plan_from_args(
+        args=args,
+        sequences=sequences,
+        filtered_hits=filtered_hits,
+        raw_blast_hits=raw_blast_hits,
+    )
+
+    tree_candidate_hits = collect_tree_candidate_hits(placement_plan)
+    
     # Step 3: Process taxonomy information
     logger.info(f"\n[Step 3/9] Processing taxonomy information (rank: {args.rank})...")
     
     try:
         results = process_blast_results_for_taxonomy(
-            blast_hits=filtered_hits,
+            blast_hits=tree_candidate_hits,
             output_dir=args.output_dir,
             rank=args.rank,
             database=args.database,
@@ -966,7 +1023,7 @@ def grouped_command(args):
     # Step 4: Check alignment consistency
     logger.info("\n[Step 4/9] Checking alignment consistency...")
     consistency = check_alignment_consistency(
-        blast_hits=filtered_hits,
+        blast_hits=tree_candidate_hits,
         tolerance=args.alignment_tolerance
     )
     
@@ -981,7 +1038,7 @@ def grouped_command(args):
 
     # Step 5: Group hits by group_rank
     logger.info(f"\n[Step 5/9] Grouping hits by {args.group_rank}...")
-    grouped_hits = group_hits_by_group_rank(filtered_hits, args.group_rank)
+    grouped_hits = group_hits_by_group_rank(tree_candidate_hits, args.group_rank)
     
     if not grouped_hits:
         logger.error("No groups found after grouping by rank")
@@ -1146,6 +1203,7 @@ def grouped_command(args):
             tree_label_rank=args.tree_label_rank,
             tree_files=tree_files_map if tree_files_map else None,
             raw_blast_hits=raw_blast_hits,
+            placement_plan=placement_plan,
         )
         
         if success:
@@ -1163,7 +1221,7 @@ def grouped_command(args):
                 output_dir=args.output_dir,
                 query_fasta=args.query_fasta,
                 classification_file=args.output_classification,
-                blast_hits=filtered_hits,
+                blast_hits=tree_candidate_hits,
                 combined_tree_label_rank=args.combined_tree_label_rank,
                 num_threads=args.num_threads
             )
@@ -1205,6 +1263,67 @@ def _add_log_level_argument(p, *, is_top_level=False):
         help='Set logging verbosity level (default: INFO)'
     )
 
+def _add_placement_arguments(p):
+    """
+    Add placement/rescue threshold arguments.
+
+    These thresholds control phylogenetic placement eligibility, not strict
+    BLAST classification confidence.
+    """
+    p.add_argument(
+        '--placement-min-identity',
+        type=float,
+        default=70.0,
+        help=(
+            'Minimum percent identity for moderate raw hits to be used as '
+            'phylogenetic placement anchors (default: 70.0).'
+        )
+    )
+    p.add_argument(
+        '--placement-min-coverage',
+        type=float,
+        default=50.0,
+        help=(
+            'Minimum query coverage for moderate raw hits to be used as '
+            'phylogenetic placement anchors (default: 50.0).'
+        )
+    )
+    p.add_argument(
+        '--rescue-min-identity',
+        type=float,
+        default=50.0,
+        help=(
+            'Minimum percent identity for weak raw hits to be used for broad '
+            'rescue placement only (default: 50.0).'
+        )
+    )
+    p.add_argument(
+        '--rescue-min-coverage',
+        type=float,
+        default=40.0,
+        help=(
+            'Minimum query coverage for weak raw hits to be used for broad '
+            'rescue placement only (default: 40.0).'
+        )
+    )
+    p.add_argument(
+        '--max-placement-hits-per-query',
+        type=int,
+        default=None,
+        help=(
+            'Maximum number of moderate placement hits to keep per query. '
+            'Default keeps all hits passing placement thresholds.'
+        )
+    )
+    p.add_argument(
+        '--max-rescue-hits-per-query',
+        type=int,
+        default=25,
+        help=(
+            'Maximum number of weak rescue hits to keep per query '
+            '(default: 25).'
+        )
+    )
 
 def main():
     """Main entry point for the ePLACE CLI."""
@@ -1395,6 +1514,8 @@ Notes:
         default=80.0,
         help='Minimum query coverage percentage (default: 80.0)'
     )
+    _add_placement_arguments(search_parser)
+    
     search_parser.add_argument(
         '--database',
         type=str,
@@ -1594,6 +1715,8 @@ Notes:
         default=80.0,
         help='Minimum query coverage percentage (default: 80.0)'
     )
+    _add_placement_arguments(grouped_parser)
+    
     grouped_parser.add_argument(
         '--database',
         type=str,

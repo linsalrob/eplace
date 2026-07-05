@@ -11,10 +11,12 @@ import subprocess
 import logging
 import sys
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Callable
+from typing import Optional, List, Dict, Tuple, Callable, Mapping
 from collections import defaultdict
 
 from .blast_analysis import BlastHit, normalize_sequence_id, _parse_nbdl_custom_header
+
+from .placement import QueryPlacementPlan
 
 import pytaxonkit
 
@@ -1264,6 +1266,7 @@ def generate_classification_summary(
     tree_label_rank: str = "genus",
     tree_files: Optional[dict[str, Path]] = None,
     raw_blast_hits: Optional[List[BlastHit]] = None,
+    placement_plan: Optional[Mapping[str, QueryPlacementPlan]] = None,
 ) -> bool:
     """
     Generate a classification summary TSV file for each query sequence.
@@ -1382,6 +1385,14 @@ def generate_classification_summary(
             'raw_best_subject_id': 'N/A',
             'raw_best_taxonomy': ';;;;;',
             'raw_evidence_status': 'no_detectable_match',
+            'placement_route': 'no_evidence',
+            'placement_hit_count': 0,
+            'placement_best_percent_identity': 'N/A',
+            'placement_best_query_coverage': 'N/A',
+            'placement_best_bit_score': 'N/A',
+            'placement_best_subject_id': 'N/A',
+            'phylogenetic_placement_attempted': 'No',
+            'phylogenetic_placement_reason': 'No placement plan was available.',
             'appears_in_multiple_groups': 'No',
             'has_classification': 'Yes'
         }
@@ -1392,6 +1403,9 @@ def generate_classification_summary(
         )
         classification.update(raw_evidence)
         
+        if placement_plan and query_id in placement_plan:
+            classification.update(placement_plan[query_id].to_summary_fields())
+            
         if not query_hits:
             # No retained hits for this query
             classification['has_classification'] = 'No'
@@ -1628,6 +1642,14 @@ def generate_classification_summary(
                 'raw_best_subject_id',
                 'raw_best_taxonomy',
                 'raw_evidence_status',
+                'placement_route',
+                'placement_hit_count',
+                'placement_best_percent_identity',
+                'placement_best_query_coverage',
+                'placement_best_bit_score',
+                'placement_best_subject_id',
+                'phylogenetic_placement_attempted',
+                'phylogenetic_placement_reason',
                 'has_classification'
             ]
             f.write('\t'.join(headers) + '\n')
