@@ -1036,6 +1036,59 @@ def grouped_command(args):
 
     # Step 5: Group hits by group_rank
     logger.info(f"\n[Step 5/9] Grouping hits by {args.group_rank}...")
+    
+    # Defensive taxonomy attachment before grouped workflow.
+    # This is needed when taxids were recovered from custom BLAST output/header fields
+    # but subject_taxonomy was not attached to the BlastHit objects used for grouping.
+    from .taxonomy import TaxonomyExtractor
+
+    missing_taxonomy = [
+        h for h in filtered_hits
+        if not isinstance(h.subject_taxonomy, dict)
+    ]
+
+    if missing_taxonomy:
+        logger.warning(
+            "Detected %d/%d filtered hits without attached subject_taxonomy before grouping. "
+            "Attempting to attach taxonomy from subject_taxid.",
+            len(missing_taxonomy),
+            len(filtered_hits),
+        )
+
+        missing_values = {"", "0", "N/A", "NA", "-"}
+        taxids = sorted({
+            h.subject_taxid
+            for h in filtered_hits
+            if h.subject_taxid not in missing_values
+        })
+
+        logger.info("Recovering taxonomy for %d unique valid taxids before grouping", len(taxids))
+
+        tax_dict = TaxonomyExtractor().parse_taxids(taxids)
+
+        attached = 0
+        with_group_rank = 0
+
+        for h in filtered_hits:
+            if h.subject_taxid in tax_dict:
+                h.subject_taxonomy = tax_dict[h.subject_taxid]
+                attached += 1
+                if args.group_rank in h.subject_taxonomy:
+                    with_group_rank += 1
+
+        logger.info("Attached taxonomy to %d filtered hits", attached)
+        logger.info("Hits with group rank '%s': %d", args.group_rank, with_group_rank)
+
+        for h in filtered_hits[:20]:
+            logger.info(
+                "Grouping debug: query=%s subject=%s taxid=%r taxonomy=%r group_value=%r",
+                h.query_id,
+                h.subject_id,
+                h.subject_taxid,
+                h.subject_taxonomy,
+                h.subject_taxonomy.get(args.group_rank) if isinstance(h.subject_taxonomy, dict) else None,
+            )
+    
     grouped_hits = group_hits_by_group_rank(tree_candidate_hits, args.group_rank)
     
     if not grouped_hits:
