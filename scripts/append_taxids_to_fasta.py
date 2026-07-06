@@ -1,30 +1,42 @@
 #!/usr/bin/env python3
 
 """
-Append usable NCBI taxids to custom reference FASTA headers and write a BLAST taxid map.
+Append usable NCBI taxids to custom reference FASTA headers while preserving
+original sequence identifiers.
 
 This utility is intended for custom reference databases such as CSIRO/NBDL,
 BOLD, institutional FASTA exports, or mixed curated databases where sequence
 headers contain organism names but may not already contain NCBI taxids.
 
+The FASTA output deliberately preserves the original first FASTA token. For an
+NBDL record, the output header remains NBDL-native and only receives a terminal
+|taxid=<taxid> annotation when a usable NCBI taxid or conservative NCBI ancestor
+can be found.
+
+Example output header:
+
+    >NBDL-HK3QATBVPPF8GP.v1.mt|15366-17013|+|MT-RNR2 [species=...] ... |taxid=765187
+
 Resolution ladder:
 
 1. Extract organism/species name from flexible FASTA header formats.
 2. Map the exact name to a taxid using names2id.tsv.
-3. If exact name is absent, fall back to genus-level taxid when genus exists.
-4. If genus is absent and --taxonomy-hierarchy is supplied, use that hierarchy
+3. If exact name is absent, try binomial fallback for trinomial names.
+4. If exact/binomial name is absent, fall back to genus-level taxid when genus exists.
+5. If genus is absent and --taxonomy-hierarchy is supplied, use that hierarchy
    to find family/order/class/superclass for the species or genus, then map the
    first available ancestor name to names2id.tsv.
-5. If no valid NCBI ancestor can be found, preserve the custom organism name and
-   assign a stable custom label in metadata/report, but do not append fake
+6. If no valid NCBI ancestor can be found, preserve the custom organism name in
+   the mapping tables, assign a stable custom label, and do not append fake
    |taxid= values.
 
-The script writes three outputs:
+The script writes:
 
-1. Rewritten FASTA with BLAST-safe sequence IDs, ePLACE metadata, and usable
-   |taxid= annotations where possible.
+1. Rewritten FASTA with original headers preserved and usable |taxid= annotations.
 2. Report TSV describing exact, fallback, and unresolved mappings.
-3. BLAST taxid map TSV, defaulting to taxid_map.tsv beside the output FASTA.
+3. Reference mapping TSV intended for downstream ePLACE use. This file preserves
+   the NBDL sequence ID/header, extracted organism, resolved NCBI taxid if any,
+   fallback rank/name, hierarchy source, and custom unresolved label.
 
 Expected names2id.tsv format:
 
@@ -39,22 +51,17 @@ Important:
 - The appended |taxid= value should always be a real taxid present in your
   taxonomy dump. Do not append fake custom IDs as |taxid= unless your taxonomy
   database has been extended to include them.
-- For custom species absent from NCBI, the script preserves the original name in
-  [eplace_original_organism=...] even when |taxid= points to a conservative
-  genus/family/order/class/superclass ancestor.
-- The taxid_map.tsv file is what makeblastdb needs for -taxid_map.
-- By default, the first FASTA token is sanitized to avoid BLAST -parse_seqids
-  interpreting pipe characters as special accession syntax. The original first
-  token is preserved in [eplace_original_seqid=...].
-- BLAST local IDs must be 50 characters or shorter. Sanitized IDs longer than
-  50 characters are truncated and given a short hash suffix to preserve uniqueness.
+- For custom taxa absent from NCBI, the script preserves the original name in the
+  mapping files even when |taxid= points to a conservative genus/family/order/
+  class/superclass ancestor.
+- This script does not sanitize or replace NBDL sequence IDs by default because
+  the current ePLACE NBDL workflow recovers taxids from BLAST stitle/header text.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,19 +92,7 @@ BAD_THIRD_WORDS = {
     "genome",
 }
 
-HEADER_METADATA_KEYS = [
-    "eplace_original_seqid",
-    "eplace_original_organism",
-    "eplace_taxid_assignment",
-    "eplace_taxid_rank",
-    "eplace_taxid_name",
-    "eplace_hierarchy_match",
-    "eplace_custom_label",
-]
-
 DEFAULT_HIERARCHY_FALLBACK_RANKS = ["Family", "Order", "Class", "SuperClass"]
-MAX_BLAST_LOCAL_ID_LENGTH = 50
-HASH_SUFFIX_LENGTH = 10
 
 
 @dataclass
@@ -155,7 +150,15 @@ class NameMatch:
     assigned_name: str
     extraction_method: str
     hierarchy_match: str = ""
+    hierarchy_family: str = ""
+    hierarchy_order: str = ""
+    hierarchy_class: str = ""
+    hierarchy_superclass: str = ""
     custom_label: str = ""
+
+    @property
+    def has_usable_taxid(self) -> bool:
+        return bool(self.assigned_taxid and self.assigned_taxid != "0")
 
 
 def normalize_column_name(value: str) -> str:
@@ -207,6 +210,14 @@ def extract_binomial_or_trinomial(text: str) -> Optional[str]:
     return None
 
 
+def binomial_from_name(name: str) -> Optional[str]:
+    """Return Genus species from a longer scientific name when possible."""
+    parts = clean_candidate_name(name).split()
+    if len(parts) >= 2:
+        return f"{parts[0]} {parts[1]}"
+    return None
+
+
 def extract_name_from_header(header: str) -> tuple[Optional[str], str]:
     """Return candidate organism/species name and extraction method."""
     h = header.lstrip(">").strip()
@@ -240,6 +251,11 @@ def genus_from_name(name: str) -> Optional[str]:
     if re.match(r"^[A-Z][a-zA-Z-]+$", genus):
         return genus
     return None
+
+
+def sequence_id_from_header(header: str) -> str:
+    """Return the original first whitespace-delimited FASTA token without leading >."""
+    return header.lstrip(">").strip().split()[0]
 
 
 def load_names2id(path: Path) -> dict[str, str]:
@@ -319,123 +335,8 @@ def strip_existing_taxid(header: str) -> str:
     return re.sub(r"\s*\|taxid=\d+\s*$", "", header.rstrip())
 
 
-def strip_eplace_metadata(header: str) -> str:
-    """Remove existing ePLACE taxid-assignment metadata fields."""
-    cleaned = header.rstrip()
-    for key in HEADER_METADATA_KEYS:
-        cleaned = re.sub(rf"\s*\[{re.escape(key)}=[^\]]*\]", "", cleaned)
-    return cleaned
-
-
-def bracket_escape(value: str) -> str:
-    """Make a value safe for bracket-style FASTA metadata."""
-    return value.replace("]", ")").replace("[", "(").strip()
-
-
-def sequence_id_from_header(header: str) -> str:
-    """Return the first whitespace-delimited FASTA token without leading >."""
-    return header.lstrip(">").strip().split()[0]
-
-
-def shorten_blast_local_id(seqid: str, max_length: int = MAX_BLAST_LOCAL_ID_LENGTH) -> str:
-    """
-    Ensure a BLAST local ID is no longer than max_length.
-
-    BLAST local IDs are limited to 50 characters. If the sanitized ID is longer,
-    keep a readable prefix and append a deterministic short hash derived from the
-    full sanitized ID.
-    """
-    if len(seqid) <= max_length:
-        return seqid
-
-    hash_suffix = hashlib.md5(seqid.encode("utf-8")).hexdigest()[:HASH_SUFFIX_LENGTH]
-    prefix_length = max_length - HASH_SUFFIX_LENGTH - 1
-    prefix = seqid[:prefix_length].rstrip("_.-")
-    return f"{prefix}_{hash_suffix}"
-
-
-def sanitize_sequence_id(seqid: str) -> str:
-    """
-    Convert a custom FASTA sequence ID into a BLAST-safe local ID.
-
-    NCBI BLAST treats pipe-delimited IDs as special accession syntax when
-    -parse_seqids is used. Replacing those separators avoids taxid_map mismatch
-    errors while keeping the ID readable. The final ID is capped at 50 chars.
-    """
-    cleaned = seqid.strip()
-    cleaned = cleaned.replace("|+|", "_plus_")
-    cleaned = cleaned.replace("|-|", "_minus_")
-    cleaned = cleaned.replace("|", "_")
-    cleaned = cleaned.replace("+", "plus")
-    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", cleaned)
-    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
-
-    if not cleaned:
-        cleaned = "seq"
-
-    if not re.match(r"^[A-Za-z0-9]", cleaned):
-        cleaned = f"seq_{cleaned}"
-
-    return shorten_blast_local_id(cleaned)
-
-
-def make_unique_seqid(seqid: str, seen: dict[str, int]) -> str:
-    """Ensure sanitized FASTA IDs are unique and still <=50 characters."""
-    if seqid not in seen:
-        seen[seqid] = 1
-        return seqid
-
-    seen[seqid] += 1
-    suffix = f"_{seen[seqid]}"
-    max_prefix = MAX_BLAST_LOCAL_ID_LENGTH - len(suffix)
-    return f"{seqid[:max_prefix].rstrip('_.-')}{suffix}"
-
-
-def rewrite_header_seqid(header: str, new_seqid: str) -> str:
-    """Replace the first FASTA token with a BLAST-safe sequence ID."""
-    body = header.lstrip(">").rstrip()
-    parts = body.split(maxsplit=1)
-    rest = f" {parts[1]}" if len(parts) > 1 else ""
-    return f">{new_seqid}{rest}"
-
-
-def append_seqid_metadata(header: str, original_seqid: str, new_seqid: str) -> str:
-    """Preserve the original custom sequence ID when it was sanitized."""
-    if original_seqid == new_seqid:
-        return header
-    return f"{header} [eplace_original_seqid={bracket_escape(original_seqid)}]"
-
-
-def append_assignment_metadata(header: str, match: NameMatch) -> str:
-    """Append ePLACE metadata preserving the original custom organism name."""
-    if not match.candidate_name:
-        return header
-
-    fields = [
-        f"[eplace_original_organism={bracket_escape(match.candidate_name)}]",
-        f"[eplace_taxid_assignment={match.status}]",
-        f"[eplace_taxid_rank={match.assigned_rank or 'unmapped'}]",
-    ]
-
-    if match.assigned_name:
-        fields.append(f"[eplace_taxid_name={bracket_escape(match.assigned_name)}]")
-
-    if match.hierarchy_match:
-        fields.append(f"[eplace_hierarchy_match={bracket_escape(match.hierarchy_match)}]")
-
-    if match.custom_label:
-        fields.append(f"[eplace_custom_label={bracket_escape(match.custom_label)}]")
-
-    return f"{header} {' '.join(fields)}"
-
-
-def append_taxid_to_header(
-    header: str,
-    taxid: Optional[str],
-    *,
-    replace_existing: bool = False,
-) -> str:
-    """Append |taxid=<taxid> to a FASTA header."""
+def append_taxid_to_header(header: str, taxid: Optional[str], *, replace_existing: bool = False) -> str:
+    """Append |taxid=<taxid> to the end of a FASTA header without changing anything else."""
     header = header.rstrip()
 
     if existing_taxid(header) and not replace_existing:
@@ -450,6 +351,25 @@ def append_taxid_to_header(
     return header
 
 
+def hierarchy_details(record: Optional[HierarchyRecord]) -> dict[str, str]:
+    if record is None:
+        return {
+            "hierarchy_match": "",
+            "hierarchy_family": "",
+            "hierarchy_order": "",
+            "hierarchy_class": "",
+            "hierarchy_superclass": "",
+        }
+
+    return {
+        "hierarchy_match": record.species or record.genus,
+        "hierarchy_family": record.family,
+        "hierarchy_order": record.order,
+        "hierarchy_class": record.class_name,
+        "hierarchy_superclass": record.superclass,
+    }
+
+
 def try_hierarchy_fallback(
     candidate_name: str,
     names2id: dict[str, str],
@@ -461,7 +381,7 @@ def try_hierarchy_fallback(
     if record is None:
         return None
 
-    hierarchy_identity = record.species or record.genus or candidate_name
+    details = hierarchy_details(record)
 
     for rank in fallback_ranks:
         ancestor_name = record.value_for_rank(rank)
@@ -482,10 +402,41 @@ def try_hierarchy_fallback(
             assigned_rank=rank.lower(),
             assigned_name=ancestor_name,
             extraction_method="",
-            hierarchy_match=hierarchy_identity,
+            hierarchy_match=details["hierarchy_match"],
+            hierarchy_family=details["hierarchy_family"],
+            hierarchy_order=details["hierarchy_order"],
+            hierarchy_class=details["hierarchy_class"],
+            hierarchy_superclass=details["hierarchy_superclass"],
         )
 
-    return None
+    # Hierarchy knew the organism/genus, but none of its chosen ancestors were in names2id.
+    return NameMatch(
+        status="unmapped_hierarchy_match_no_ncbi_ancestor",
+        candidate_name=candidate_name,
+        assigned_taxid="",
+        assigned_rank="",
+        assigned_name="",
+        extraction_method="",
+        hierarchy_match=details["hierarchy_match"],
+        hierarchy_family=details["hierarchy_family"],
+        hierarchy_order=details["hierarchy_order"],
+        hierarchy_class=details["hierarchy_class"],
+        hierarchy_superclass=details["hierarchy_superclass"],
+    )
+
+
+def assign_custom_label(
+    candidate_name: str,
+    custom_taxon_prefix: Optional[str],
+    custom_taxa_seen: Optional[dict[str, str]],
+) -> str:
+    if not custom_taxon_prefix or custom_taxa_seen is None:
+        return ""
+
+    key = normalize_name_for_lookup(candidate_name)
+    if key not in custom_taxa_seen:
+        custom_taxa_seen[key] = f"{custom_taxon_prefix}{len(custom_taxa_seen) + 1}"
+    return custom_taxa_seen[key]
 
 
 def resolve_taxid(
@@ -497,7 +448,7 @@ def resolve_taxid(
     custom_taxon_prefix: Optional[str] = None,
     custom_taxa_seen: Optional[dict[str, str]] = None,
 ) -> NameMatch:
-    """Resolve candidate name to exact, genus, hierarchy-derived ancestor, or unmapped."""
+    """Resolve candidate name to exact, binomial, genus, hierarchy-derived ancestor, or unmapped."""
     if not candidate_name:
         return NameMatch(
             status="unmapped_no_candidate_name",
@@ -520,6 +471,19 @@ def resolve_taxid(
             extraction_method="",
         )
 
+    binomial = binomial_from_name(candidate_name)
+    if binomial and normalize_name_for_lookup(binomial) != normalized_candidate:
+        binomial_taxid = names2id.get(normalize_name_for_lookup(binomial))
+        if binomial_taxid:
+            return NameMatch(
+                status="mapped_binomial_fallback",
+                candidate_name=candidate_name,
+                assigned_taxid=binomial_taxid,
+                assigned_rank="species",
+                assigned_name=binomial,
+                extraction_method="",
+            )
+
     genus = genus_from_name(candidate_name)
     if genus:
         genus_taxid = names2id.get(normalize_name_for_lookup(genus))
@@ -541,24 +505,63 @@ def resolve_taxid(
             fallback_ranks=hierarchy_fallback_ranks or DEFAULT_HIERARCHY_FALLBACK_RANKS,
         )
         if hierarchy_match:
+            if not hierarchy_match.has_usable_taxid:
+                hierarchy_match.custom_label = assign_custom_label(
+                    candidate_name,
+                    custom_taxon_prefix,
+                    custom_taxa_seen,
+                )
             return hierarchy_match
 
-    custom_label = ""
-    if custom_taxon_prefix and custom_taxa_seen is not None:
-        key = normalized_candidate
-        if key not in custom_taxa_seen:
-            custom_taxa_seen[key] = f"{custom_taxon_prefix}{len(custom_taxa_seen) + 1}"
-        custom_label = custom_taxa_seen[key]
-
     return NameMatch(
-        status="unmapped",
+        status="unmapped_no_ncbi_match",
         candidate_name=candidate_name,
         assigned_taxid="",
         assigned_rank="",
         assigned_name="",
         extraction_method="",
-        custom_label=custom_label,
+        custom_label=assign_custom_label(candidate_name, custom_taxon_prefix, custom_taxa_seen),
     )
+
+
+def write_report_row(writer: csv.writer, values: dict[str, str]) -> None:
+    writer.writerow([
+        values["seq_id"],
+        values["status"],
+        values["candidate_name"],
+        values["assigned_taxid"],
+        values["assigned_rank"],
+        values["assigned_name"],
+        values["hierarchy_match"],
+        values["hierarchy_family"],
+        values["hierarchy_order"],
+        values["hierarchy_class"],
+        values["hierarchy_superclass"],
+        values["custom_label"],
+        values["extraction_method"],
+        values["original_header"],
+        values["new_header"],
+    ])
+
+
+def write_reference_map_row(writer: csv.writer, values: dict[str, str]) -> None:
+    writer.writerow([
+        values["seq_id"],
+        values["candidate_name"],
+        values["status"],
+        values["assigned_taxid"],
+        values["assigned_rank"],
+        values["assigned_name"],
+        values["hierarchy_match"],
+        values["hierarchy_family"],
+        values["hierarchy_order"],
+        values["hierarchy_class"],
+        values["hierarchy_superclass"],
+        values["custom_label"],
+        values["extraction_method"],
+        values["original_header"],
+        values["new_header"],
+    ])
 
 
 def process_fasta(
@@ -566,52 +569,55 @@ def process_fasta(
     output_fasta: Path,
     names2id: dict[str, str],
     report_tsv: Path,
-    taxid_map: Path,
+    reference_map_tsv: Path,
     *,
     taxonomy_hierarchy: Optional[TaxonomyHierarchy] = None,
     hierarchy_fallback_ranks: Optional[list[str]] = None,
     replace_existing: bool = False,
-    refresh_eplace_metadata: bool = False,
     custom_taxon_prefix: Optional[str] = None,
-    sanitize_seqids: bool = True,
 ) -> None:
-    """Process FASTA headers and append usable taxids plus ePLACE metadata."""
+    """Process FASTA headers and append usable taxids only at the end of headers."""
     total = 0
     already_had_taxid = 0
     mapped_exact = 0
+    mapped_binomial = 0
     mapped_genus = 0
     mapped_hierarchy = 0
     unresolved = 0
-    taxid_map_written = 0
     custom_taxa_seen: dict[str, str] = {}
-    seen_seqids: dict[str, int] = {}
 
     output_fasta.parent.mkdir(parents=True, exist_ok=True)
     report_tsv.parent.mkdir(parents=True, exist_ok=True)
-    taxid_map.parent.mkdir(parents=True, exist_ok=True)
+    reference_map_tsv.parent.mkdir(parents=True, exist_ok=True)
+
+    report_header = [
+        "seq_id",
+        "status",
+        "candidate_name",
+        "assigned_taxid",
+        "assigned_rank",
+        "assigned_name",
+        "hierarchy_match",
+        "hierarchy_family",
+        "hierarchy_order",
+        "hierarchy_class",
+        "hierarchy_superclass",
+        "custom_label",
+        "extraction_method",
+        "original_header",
+        "new_header",
+    ]
 
     with (
         input_fasta.open() as inp,
         output_fasta.open("w") as out,
         report_tsv.open("w") as rep,
-        taxid_map.open("w") as taxmap,
+        reference_map_tsv.open("w") as refmap,
     ):
         report_writer = csv.writer(rep, delimiter="\t")
-        report_writer.writerow([
-            "seq_id",
-            "original_seq_id",
-            "status",
-            "candidate_name",
-            "assigned_taxid",
-            "assigned_rank",
-            "assigned_name",
-            "hierarchy_match",
-            "custom_label",
-            "extraction_method",
-            "taxid_map_written",
-            "original_header",
-            "new_header",
-        ])
+        refmap_writer = csv.writer(refmap, delimiter="\t")
+        report_writer.writerow(report_header)
+        refmap_writer.writerow(report_header)
 
         for line in inp:
             if not line.startswith(">"):
@@ -620,23 +626,12 @@ def process_fasta(
 
             total += 1
             original_header = line.rstrip("\n")
-            original_seqid = sequence_id_from_header(original_header)
-            base_seqid = sanitize_sequence_id(original_seqid) if sanitize_seqids else shorten_blast_local_id(original_seqid)
-            seq_id = make_unique_seqid(base_seqid, seen_seqids)
-
+            seq_id = sequence_id_from_header(original_header)
             current_taxid = existing_taxid(original_header)
             candidate_name, method = extract_name_from_header(original_header)
 
-            working_header = original_header
-            if refresh_eplace_metadata:
-                working_header = strip_eplace_metadata(working_header)
-
-            working_header = rewrite_header_seqid(working_header, seq_id)
-            working_header = append_seqid_metadata(working_header, original_seqid, seq_id)
-
             if current_taxid and not replace_existing:
                 already_had_taxid += 1
-
                 match = NameMatch(
                     status="already_had_taxid",
                     candidate_name=candidate_name or "",
@@ -645,90 +640,68 @@ def process_fasta(
                     assigned_name=candidate_name or "",
                     extraction_method=method,
                 )
-
-                if refresh_eplace_metadata and candidate_name:
-                    working_header = append_assignment_metadata(working_header, match)
-
-                out.write(working_header + "\n")
-                taxmap.write(f"{seq_id}\t{current_taxid}\n")
-                taxid_map_written += 1
-
-                report_writer.writerow([
-                    seq_id,
-                    original_seqid,
-                    match.status,
-                    match.candidate_name,
-                    match.assigned_taxid,
-                    match.assigned_rank,
-                    match.assigned_name,
-                    match.hierarchy_match,
-                    match.custom_label,
-                    method,
-                    "Yes",
-                    original_header,
-                    working_header,
-                ])
-                continue
-
-            match = resolve_taxid(
-                candidate_name,
-                names2id,
-                taxonomy_hierarchy=taxonomy_hierarchy,
-                hierarchy_fallback_ranks=hierarchy_fallback_ranks,
-                custom_taxon_prefix=custom_taxon_prefix,
-                custom_taxa_seen=custom_taxa_seen,
-            )
-            match.extraction_method = method
-
-            if match.status == "mapped_exact":
-                mapped_exact += 1
-            elif match.status == "mapped_genus_fallback":
-                mapped_genus += 1
-            elif "hierarchy_fallback" in match.status:
-                mapped_hierarchy += 1
+                new_header = original_header
             else:
-                unresolved += 1
+                match = resolve_taxid(
+                    candidate_name,
+                    names2id,
+                    taxonomy_hierarchy=taxonomy_hierarchy,
+                    hierarchy_fallback_ranks=hierarchy_fallback_ranks,
+                    custom_taxon_prefix=custom_taxon_prefix,
+                    custom_taxa_seen=custom_taxa_seen,
+                )
+                match.extraction_method = method
 
-            working_header = append_assignment_metadata(working_header, match)
-            working_header = append_taxid_to_header(
-                working_header,
-                match.assigned_taxid or None,
-                replace_existing=replace_existing,
-            )
+                if match.status == "mapped_exact":
+                    mapped_exact += 1
+                elif match.status == "mapped_binomial_fallback":
+                    mapped_binomial += 1
+                elif match.status == "mapped_genus_fallback":
+                    mapped_genus += 1
+                elif "hierarchy_fallback" in match.status:
+                    mapped_hierarchy += 1
+                else:
+                    unresolved += 1
 
-            taxid_map_status = "No"
-            if match.assigned_taxid:
-                taxmap.write(f"{seq_id}\t{match.assigned_taxid}\n")
-                taxid_map_written += 1
-                taxid_map_status = "Yes"
+                new_header = append_taxid_to_header(
+                    original_header,
+                    match.assigned_taxid or None,
+                    replace_existing=replace_existing,
+                )
 
-            out.write(working_header + "\n")
-            report_writer.writerow([
-                seq_id,
-                original_seqid,
-                match.status,
-                match.candidate_name,
-                match.assigned_taxid,
-                match.assigned_rank,
-                match.assigned_name,
-                match.hierarchy_match,
-                match.custom_label,
-                method,
-                taxid_map_status,
-                original_header,
-                working_header,
-            ])
+            out.write(new_header + "\n")
+
+            values = {
+                "seq_id": seq_id,
+                "status": match.status,
+                "candidate_name": match.candidate_name,
+                "assigned_taxid": match.assigned_taxid,
+                "assigned_rank": match.assigned_rank,
+                "assigned_name": match.assigned_name,
+                "hierarchy_match": match.hierarchy_match,
+                "hierarchy_family": match.hierarchy_family,
+                "hierarchy_order": match.hierarchy_order,
+                "hierarchy_class": match.hierarchy_class,
+                "hierarchy_superclass": match.hierarchy_superclass,
+                "custom_label": match.custom_label,
+                "extraction_method": match.extraction_method,
+                "original_header": original_header,
+                "new_header": new_header,
+            }
+
+            write_report_row(report_writer, values)
+            write_reference_map_row(refmap_writer, values)
 
     print(f"Input records: {total}")
     print(f"Already had taxid: {already_had_taxid}")
     print(f"Mapped exact name: {mapped_exact}")
+    print(f"Mapped by binomial fallback: {mapped_binomial}")
     print(f"Mapped by genus fallback: {mapped_genus}")
     print(f"Mapped by taxonomy hierarchy fallback: {mapped_hierarchy}")
     print(f"Unresolved/no usable ancestor: {unresolved}")
-    print(f"Taxid map rows written: {taxid_map_written}")
     print(f"Wrote FASTA: {output_fasta}")
     print(f"Wrote report: {report_tsv}")
-    print(f"Wrote BLAST taxid map: {taxid_map}")
+    print(f"Wrote reference map: {reference_map_tsv}")
 
 
 def parse_fallback_ranks(value: str) -> list[str]:
@@ -737,17 +710,16 @@ def parse_fallback_ranks(value: str) -> list[str]:
     return ranks or DEFAULT_HIERARCHY_FALLBACK_RANKS
 
 
-def default_taxid_map_path(output_fasta: Path) -> Path:
-    """Default to taxid_map.tsv beside the rewritten FASTA."""
-    return output_fasta.parent / "taxid_map.tsv"
+def default_reference_map_path(output_fasta: Path) -> Path:
+    """Default reference mapping path beside the rewritten FASTA."""
+    return output_fasta.parent / "reference_taxid_mapping.tsv"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Append NCBI taxids to custom FASTA headers using organism/species "
-            "names, with genus and optional taxonomy-hierarchy fallback. Also "
-            "writes a BLAST-compatible taxid_map.tsv."
+            "Append terminal |taxid= annotations to custom FASTA headers while preserving "
+            "original NBDL sequence IDs. Also writes a downstream reference mapping TSV."
         )
     )
     parser.add_argument("-i", "--input-fasta", required=True, type=Path, help="Input FASTA file.")
@@ -756,7 +728,7 @@ def main() -> int:
         "--output-fasta",
         required=True,
         type=Path,
-        help="Output FASTA file with BLAST-safe IDs and |taxid= appended where possible.",
+        help="Output FASTA file with original headers preserved and |taxid= appended where possible.",
     )
     parser.add_argument("-n", "--names2id", required=True, type=Path, help="Two-column TSV: scientific_name<TAB>taxid.")
     parser.add_argument(
@@ -764,15 +736,15 @@ def main() -> int:
         "--report-tsv",
         required=True,
         type=Path,
-        help="Output TSV report of exact, genus-fallback, hierarchy-fallback, and unmapped records.",
+        help="Output TSV report of exact, fallback, hierarchy, and unresolved records.",
     )
     parser.add_argument(
-        "--taxid-map",
+        "--reference-map",
         default=None,
         type=Path,
         help=(
-            "Output BLAST taxid map TSV. Default: taxid_map.tsv beside the output FASTA. "
-            "Use this file with makeblastdb -taxid_map."
+            "Output downstream reference mapping TSV. Default: reference_taxid_mapping.tsv "
+            "beside the output FASTA."
         ),
     )
     parser.add_argument(
@@ -780,36 +752,30 @@ def main() -> int:
         default=None,
         type=Path,
         help=(
-            "Optional fish taxonomy hierarchy CSV. Expected columns include "
-            "Species, Genus, Subfamily, Family, Order, Class, SuperClass. "
-            "Used only after exact species/name and genus taxid lookup fail."
+            "Optional fish taxonomy hierarchy CSV. Expected columns include Species, Genus, "
+            "Subfamily, Family, Order, Class, SuperClass. Used only after exact/binomial/genus "
+            "taxid lookup fails."
         ),
     )
     parser.add_argument(
         "--hierarchy-fallback-ranks",
         default=",".join(DEFAULT_HIERARCHY_FALLBACK_RANKS),
         help=(
-            "Comma-delimited hierarchy ranks to try when exact/genus lookup fail. "
+            "Comma-delimited hierarchy ranks to try when exact/binomial/genus lookup fail. "
             "Default: Family,Order,Class,SuperClass"
         ),
     )
-    parser.add_argument("--replace-existing", action="store_true", help="Replace existing |taxid= values instead of preserving them.")
     parser.add_argument(
-        "--refresh-eplace-metadata",
+        "--replace-existing",
         action="store_true",
-        help="Remove old [eplace_*] metadata fields and rewrite them.",
+        help="Replace existing terminal |taxid= values instead of preserving them.",
     )
     parser.add_argument(
         "--custom-taxon-prefix",
         default="CUSTOM_",
-        help="Prefix for unresolved custom taxa in the report/header metadata. These labels are not appended as |taxid=.",
-    )
-    parser.add_argument(
-        "--keep-original-seqids",
-        action="store_true",
         help=(
-            "Do not sanitize the first FASTA token. Not recommended for pipe-delimited NBDL IDs "
-            "when using makeblastdb -parse_seqids. IDs are still capped at 50 characters."
+            "Prefix for unresolved custom taxa in the report/reference map. These labels are "
+            "not appended as |taxid=. Default: CUSTOM_"
         ),
     )
 
@@ -818,20 +784,18 @@ def main() -> int:
     names2id = load_names2id(args.names2id)
     taxonomy_hierarchy = load_taxonomy_hierarchy(args.taxonomy_hierarchy)
     hierarchy_fallback_ranks = parse_fallback_ranks(args.hierarchy_fallback_ranks)
-    taxid_map = args.taxid_map or default_taxid_map_path(args.output_fasta)
+    reference_map = args.reference_map or default_reference_map_path(args.output_fasta)
 
     process_fasta(
         input_fasta=args.input_fasta,
         output_fasta=args.output_fasta,
         names2id=names2id,
         report_tsv=args.report_tsv,
-        taxid_map=taxid_map,
+        reference_map_tsv=reference_map,
         taxonomy_hierarchy=taxonomy_hierarchy,
         hierarchy_fallback_ranks=hierarchy_fallback_ranks,
         replace_existing=args.replace_existing,
-        refresh_eplace_metadata=args.refresh_eplace_metadata,
         custom_taxon_prefix=args.custom_taxon_prefix,
-        sanitize_seqids=not args.keep_original_seqids,
     )
 
     return 0
