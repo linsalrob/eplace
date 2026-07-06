@@ -1,40 +1,45 @@
 #!/usr/bin/env python3
 
 """
-Append taxids to custom reference FASTA headers using organism/species names.
+Append usable NCBI taxids to custom reference FASTA headers.
 
 This utility is intended for custom reference databases such as CSIRO/NBDL,
 BOLD, institutional FASTA exports, or mixed curated databases where sequence
 headers contain organism names but may not already contain NCBI taxids.
 
-The script tries to:
+Resolution ladder:
 
-1. Extract a species/organism name from flexible FASTA header formats.
-2. Map the exact species name to an NCBI taxid using names2id.tsv.
-3. If the exact species is absent from NCBI, fall back to genus-level taxid
-   when the genus exists in names2id.tsv.
-4. Preserve the original custom organism name in the header using
-   [eplace_original_organism=...] so downstream tools can still recover the
-   informative custom species label.
-5. Write a detailed TSV report recording exact, genus-fallback, and unmapped
-   records.
+1. Extract organism/species name from flexible FASTA header formats.
+2. Map the exact name to a taxid using names2id.tsv.
+3. If exact name is absent, fall back to genus-level taxid when genus exists.
+4. If genus is absent and --taxonomy-hierarchy is supplied, use that hierarchy
+   to find family/order/class/superclass for the species or genus, then map the
+   first available ancestor name to names2id.tsv.
+5. If no valid NCBI ancestor can be found, preserve the custom organism name and
+   assign a stable custom label in metadata/report, but do not append fake
+   |taxid= values.
 
 Expected names2id.tsv format:
 
     scientific_name<TAB>taxid
 
-Example:
+Expected --taxonomy-hierarchy CSV columns, case-insensitive:
 
-    Chimaera fulva<TAB>765187
-    Chimaera<TAB>30331
+    Species, Genus, Subfamily, Family, Order, Class, SuperClass
+
+Extra columns are allowed. The script uses Species and Genus as lookup keys and
+tries fallback ranks in this order by default:
+
+    Family -> Order -> Class -> SuperClass
 
 Important:
 
 - The appended |taxid= value should always be a real taxid present in your
   taxonomy dump. Do not append fake custom IDs as |taxid= unless your taxonomy
   database has been extended to include them.
-- For species absent from NCBI, the script appends the nearest valid genus
-  taxid and preserves the original species name in header metadata.
+- For custom species absent from NCBI, the script preserves the original name in
+  [eplace_original_organism=...] even when |taxid= points to a conservative
+  genus/family/order/class/superclass ancestor.
 """
 
 from __future__ import annotations
@@ -42,22 +47,15 @@ from __future__ import annotations
 import argparse
 import csv
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 
 RANKED_NAME_PATTERNS = [
-    # [organism=Chimaera fulva]
     ("organism_bracket", re.compile(r"\[organism=([^\]]+)\]", re.IGNORECASE)),
-
-    # [species=Chimaera fulva] or [species=https://.../Chimaera_fulva]
     ("species_bracket", re.compile(r"\[species=([^\]]+)\]", re.IGNORECASE)),
-
-    # organism=Chimaera fulva; or organism="Chimaera fulva"
     ("organism_key", re.compile(r"\borganism=['\"]?([^;,\]\[]+)['\"]?", re.IGNORECASE)),
-
-    # species=Chimaera fulva; or species=https://.../Chimaera_fulva
     ("species_key", re.compile(r"\bspecies=['\"]?([^;,\]\[]+)['\"]?", re.IGNORECASE)),
 ]
 
@@ -83,7 +81,57 @@ HEADER_METADATA_KEYS = [
     "eplace_taxid_assignment",
     "eplace_taxid_rank",
     "eplace_taxid_name",
+    "eplace_hierarchy_match",
+    "eplace_custom_label",
 ]
+
+DEFAULT_HIERARCHY_FALLBACK_RANKS = ["Family", "Order", "Class", "SuperClass"]
+
+
+@dataclass
+class HierarchyRecord:
+    species: str = ""
+    genus: str = ""
+    subfamily: str = ""
+    family: str = ""
+    order: str = ""
+    class_name: str = ""
+    superclass: str = ""
+
+    def value_for_rank(self, rank: str) -> str:
+        rank_key = normalize_column_name(rank)
+        if rank_key == "species":
+            return self.species
+        if rank_key == "genus":
+            return self.genus
+        if rank_key == "subfamily":
+            return self.subfamily
+        if rank_key == "family":
+            return self.family
+        if rank_key == "order":
+            return self.order
+        if rank_key == "class":
+            return self.class_name
+        if rank_key == "superclass":
+            return self.superclass
+        return ""
+
+
+@dataclass
+class TaxonomyHierarchy:
+    by_species: dict[str, HierarchyRecord] = field(default_factory=dict)
+    by_genus: dict[str, HierarchyRecord] = field(default_factory=dict)
+
+    def lookup(self, candidate_name: str) -> Optional[HierarchyRecord]:
+        normalized = normalize_name_for_lookup(candidate_name)
+        if normalized in self.by_species:
+            return self.by_species[normalized]
+
+        genus = genus_from_name(candidate_name)
+        if genus:
+            return self.by_genus.get(normalize_name_for_lookup(genus))
+
+        return None
 
 
 @dataclass
@@ -94,7 +142,13 @@ class NameMatch:
     assigned_rank: str
     assigned_name: str
     extraction_method: str
+    hierarchy_match: str = ""
     custom_label: str = ""
+
+
+def normalize_column_name(value: str) -> str:
+    """Normalize CSV column names for case-insensitive matching."""
+    return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
 def clean_candidate_name(value: str) -> str:
@@ -131,7 +185,6 @@ def extract_binomial_or_trinomial(text: str) -> Optional[str]:
     cleaned = cleaned.replace("_", " ")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
-    # Prefer trinomial when the third word does not look like gene text.
     tri = re.search(
         r"\b([A-Z][a-zA-Z-]+)\s+([a-z][a-zA-Z-]+)\s+([a-z][a-zA-Z-]+)\b",
         cleaned,
@@ -164,7 +217,6 @@ def extract_name_from_header(header: str) -> tuple[Optional[str], str]:
         if not candidate:
             continue
 
-        # For URL-like species fields this should recover a clean binomial.
         binomial = extract_binomial_or_trinomial(candidate) or candidate
         return binomial, method
 
@@ -206,6 +258,57 @@ def load_names2id(path: Path) -> dict[str, str]:
             lookup[normalize_name_for_lookup(name)] = taxid
 
     return lookup
+
+
+def row_value(row: dict[str, str], column_map: dict[str, str], desired_column: str) -> str:
+    """Return a CSV row value by case-insensitive normalized column name."""
+    actual = column_map.get(normalize_column_name(desired_column))
+    if not actual:
+        return ""
+    return row.get(actual, "").strip()
+
+
+def load_taxonomy_hierarchy(path: Optional[Path]) -> TaxonomyHierarchy:
+    """
+    Load an optional fish taxonomy hierarchy CSV.
+
+    Expected useful columns are Species, Genus, Subfamily, Family, Order, Class,
+    and SuperClass. Column names are matched case-insensitively.
+    """
+    hierarchy = TaxonomyHierarchy()
+
+    if path is None:
+        return hierarchy
+
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            return hierarchy
+
+        column_map = {normalize_column_name(name): name for name in reader.fieldnames}
+
+        for row in reader:
+            record = HierarchyRecord(
+                species=clean_candidate_name(row_value(row, column_map, "Species")),
+                genus=clean_candidate_name(row_value(row, column_map, "Genus")),
+                subfamily=clean_candidate_name(row_value(row, column_map, "Subfamily")),
+                family=clean_candidate_name(row_value(row, column_map, "Family")),
+                order=clean_candidate_name(row_value(row, column_map, "Order")),
+                class_name=clean_candidate_name(row_value(row, column_map, "Class")),
+                superclass=clean_candidate_name(row_value(row, column_map, "SuperClass")),
+            )
+
+            if record.species:
+                hierarchy.by_species[normalize_name_for_lookup(record.species)] = record
+
+            # Store the first genus-level record only. If a genus appears multiple
+            # times, family/order/class should normally be stable; preserving the
+            # first avoids later species overwriting earlier genus metadata.
+            if record.genus:
+                genus_key = normalize_name_for_lookup(record.genus)
+                hierarchy.by_genus.setdefault(genus_key, record)
+
+    return hierarchy
 
 
 def existing_taxid(header: str) -> Optional[str]:
@@ -253,6 +356,9 @@ def append_assignment_metadata(header: str, match: NameMatch) -> str:
     if match.assigned_name:
         fields.append(f"[eplace_taxid_name={bracket_escape(match.assigned_name)}]")
 
+    if match.hierarchy_match:
+        fields.append(f"[eplace_hierarchy_match={bracket_escape(match.hierarchy_match)}]")
+
     if match.custom_label:
         fields.append(f"[eplace_custom_label={bracket_escape(match.custom_label)}]")
 
@@ -280,18 +386,63 @@ def append_taxid_to_header(
     return header
 
 
+def try_hierarchy_fallback(
+    candidate_name: str,
+    names2id: dict[str, str],
+    hierarchy: TaxonomyHierarchy,
+    fallback_ranks: list[str],
+) -> Optional[NameMatch]:
+    """
+    Try mapping candidate species/genus to an ancestor using taxonomy hierarchy.
+
+    The first ancestor rank whose name exists in names2id.tsv is used.
+    """
+    record = hierarchy.lookup(candidate_name)
+    if record is None:
+        return None
+
+    hierarchy_identity = record.species or record.genus or candidate_name
+
+    for rank in fallback_ranks:
+        ancestor_name = record.value_for_rank(rank)
+        if not ancestor_name:
+            continue
+
+        ancestor_taxid = names2id.get(normalize_name_for_lookup(ancestor_name))
+        if not ancestor_taxid:
+            continue
+
+        normalized_rank = normalize_column_name(rank)
+        status = f"mapped_{normalized_rank}_hierarchy_fallback"
+
+        return NameMatch(
+            status=status,
+            candidate_name=candidate_name,
+            assigned_taxid=ancestor_taxid,
+            assigned_rank=rank.lower(),
+            assigned_name=ancestor_name,
+            extraction_method="",
+            hierarchy_match=hierarchy_identity,
+        )
+
+    return None
+
+
 def resolve_taxid(
     candidate_name: Optional[str],
     names2id: dict[str, str],
     *,
+    taxonomy_hierarchy: Optional[TaxonomyHierarchy] = None,
+    hierarchy_fallback_ranks: Optional[list[str]] = None,
     custom_taxon_prefix: Optional[str] = None,
     custom_taxa_seen: Optional[dict[str, str]] = None,
 ) -> NameMatch:
     """
-    Resolve candidate name to exact species taxid, genus taxid, or unmapped.
+    Resolve candidate name to exact, genus, hierarchy-derived ancestor, or unmapped.
 
-    The genus fallback is intentionally conservative: the original species name
-    is preserved in ePLACE metadata while |taxid= points to a real NCBI genus.
+    The fallback behaviour is intentionally conservative: the original species
+    name is preserved in ePLACE metadata while |taxid= points to a real NCBI
+    ancestor such as genus, family, order, class, or superclass.
     """
     if not candidate_name:
         return NameMatch(
@@ -328,6 +479,16 @@ def resolve_taxid(
                 extraction_method="",
             )
 
+    if taxonomy_hierarchy is not None:
+        hierarchy_match = try_hierarchy_fallback(
+            candidate_name=candidate_name,
+            names2id=names2id,
+            hierarchy=taxonomy_hierarchy,
+            fallback_ranks=hierarchy_fallback_ranks or DEFAULT_HIERARCHY_FALLBACK_RANKS,
+        )
+        if hierarchy_match:
+            return hierarchy_match
+
     custom_label = ""
     if custom_taxon_prefix and custom_taxa_seen is not None:
         key = normalized_candidate
@@ -352,6 +513,8 @@ def process_fasta(
     names2id: dict[str, str],
     report_tsv: Path,
     *,
+    taxonomy_hierarchy: Optional[TaxonomyHierarchy] = None,
+    hierarchy_fallback_ranks: Optional[list[str]] = None,
     replace_existing: bool = False,
     refresh_eplace_metadata: bool = False,
     custom_taxon_prefix: Optional[str] = None,
@@ -361,6 +524,7 @@ def process_fasta(
     already_had_taxid = 0
     mapped_exact = 0
     mapped_genus = 0
+    mapped_hierarchy = 0
     unresolved = 0
     custom_taxa_seen: dict[str, str] = {}
 
@@ -376,6 +540,7 @@ def process_fasta(
             "assigned_taxid",
             "assigned_rank",
             "assigned_name",
+            "hierarchy_match",
             "custom_label",
             "extraction_method",
             "original_header",
@@ -421,6 +586,7 @@ def process_fasta(
                     match.assigned_taxid,
                     match.assigned_rank,
                     match.assigned_name,
+                    match.hierarchy_match,
                     match.custom_label,
                     method,
                     original_header,
@@ -431,6 +597,8 @@ def process_fasta(
             match = resolve_taxid(
                 candidate_name,
                 names2id,
+                taxonomy_hierarchy=taxonomy_hierarchy,
+                hierarchy_fallback_ranks=hierarchy_fallback_ranks,
                 custom_taxon_prefix=custom_taxon_prefix,
                 custom_taxa_seen=custom_taxa_seen,
             )
@@ -440,6 +608,8 @@ def process_fasta(
                 mapped_exact += 1
             elif match.status == "mapped_genus_fallback":
                 mapped_genus += 1
+            elif "hierarchy_fallback" in match.status:
+                mapped_hierarchy += 1
             else:
                 unresolved += 1
 
@@ -458,6 +628,7 @@ def process_fasta(
                 match.assigned_taxid,
                 match.assigned_rank,
                 match.assigned_name,
+                match.hierarchy_match,
                 match.custom_label,
                 method,
                 original_header,
@@ -468,16 +639,23 @@ def process_fasta(
     print(f"Already had taxid: {already_had_taxid}")
     print(f"Mapped exact name: {mapped_exact}")
     print(f"Mapped by genus fallback: {mapped_genus}")
+    print(f"Mapped by taxonomy hierarchy fallback: {mapped_hierarchy}")
     print(f"Unresolved/no usable ancestor: {unresolved}")
     print(f"Wrote FASTA: {output_fasta}")
     print(f"Wrote report: {report_tsv}")
+
+
+def parse_fallback_ranks(value: str) -> list[str]:
+    """Parse comma-delimited fallback ranks."""
+    ranks = [rank.strip() for rank in value.split(",") if rank.strip()]
+    return ranks or DEFAULT_HIERARCHY_FALLBACK_RANKS
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Append NCBI taxids to custom FASTA headers using organism/species "
-            "names, with genus-level fallback for taxa absent from NCBI."
+            "names, with genus and optional taxonomy-hierarchy fallback."
         )
     )
     parser.add_argument(
@@ -506,7 +684,25 @@ def main() -> int:
         "--report-tsv",
         required=True,
         type=Path,
-        help="Output TSV report of exact, genus-fallback, and unmapped records.",
+        help="Output TSV report of exact, genus-fallback, hierarchy-fallback, and unmapped records.",
+    )
+    parser.add_argument(
+        "--taxonomy-hierarchy",
+        default=None,
+        type=Path,
+        help=(
+            "Optional fish taxonomy hierarchy CSV. Expected columns include "
+            "Species, Genus, Subfamily, Family, Order, Class, SuperClass. "
+            "Used only after exact species/name and genus taxid lookup fail."
+        ),
+    )
+    parser.add_argument(
+        "--hierarchy-fallback-ranks",
+        default=",".join(DEFAULT_HIERARCHY_FALLBACK_RANKS),
+        help=(
+            "Comma-delimited hierarchy ranks to try when exact/genus lookup fail. "
+            "Default: Family,Order,Class,SuperClass"
+        ),
     )
     parser.add_argument(
         "--replace-existing",
@@ -533,12 +729,16 @@ def main() -> int:
     args = parser.parse_args()
 
     names2id = load_names2id(args.names2id)
+    taxonomy_hierarchy = load_taxonomy_hierarchy(args.taxonomy_hierarchy)
+    hierarchy_fallback_ranks = parse_fallback_ranks(args.hierarchy_fallback_ranks)
 
     process_fasta(
         input_fasta=args.input_fasta,
         output_fasta=args.output_fasta,
         names2id=names2id,
         report_tsv=args.report_tsv,
+        taxonomy_hierarchy=taxonomy_hierarchy,
+        hierarchy_fallback_ranks=hierarchy_fallback_ranks,
         replace_existing=args.replace_existing,
         refresh_eplace_metadata=args.refresh_eplace_metadata,
         custom_taxon_prefix=args.custom_taxon_prefix,
