@@ -21,7 +21,8 @@ Resolution ladder:
 
 The script writes three outputs:
 
-1. Rewritten FASTA with ePLACE metadata and usable |taxid= annotations where possible.
+1. Rewritten FASTA with BLAST-safe sequence IDs, ePLACE metadata, and usable
+   |taxid= annotations where possible.
 2. Report TSV describing exact, fallback, and unresolved mappings.
 3. BLAST taxid map TSV, defaulting to taxid_map.tsv beside the output FASTA.
 
@@ -33,11 +34,6 @@ Expected --taxonomy-hierarchy CSV columns, case-insensitive:
 
     Species, Genus, Subfamily, Family, Order, Class, SuperClass
 
-Extra columns are allowed. The script uses Species and Genus as lookup keys and
-tries fallback ranks in this order by default:
-
-    Family -> Order -> Class -> SuperClass
-
 Important:
 
 - The appended |taxid= value should always be a real taxid present in your
@@ -46,9 +42,10 @@ Important:
 - For custom species absent from NCBI, the script preserves the original name in
   [eplace_original_organism=...] even when |taxid= points to a conservative
   genus/family/order/class/superclass ancestor.
-- The taxid_map.tsv file is what makeblastdb needs for -taxid_map. The |taxid=
-  annotation in the FASTA header is useful metadata, but BLAST does not reliably
-  convert arbitrary header text into internal sequence taxids without a taxid map.
+- The taxid_map.tsv file is what makeblastdb needs for -taxid_map.
+- By default, the first FASTA token is sanitized to avoid BLAST -parse_seqids
+  interpreting pipe characters as special accession syntax. The original first
+  token is preserved in [eplace_original_seqid=...].
 """
 
 from __future__ import annotations
@@ -86,6 +83,7 @@ BAD_THIRD_WORDS = {
 }
 
 HEADER_METADATA_KEYS = [
+    "eplace_original_seqid",
     "eplace_original_organism",
     "eplace_taxid_assignment",
     "eplace_taxid_rank",
@@ -161,12 +159,7 @@ def normalize_column_name(value: str) -> str:
 
 
 def clean_candidate_name(value: str) -> str:
-    """
-    Clean a candidate organism/species string.
-
-    Handles URL endings like https://.../Chimaera_fulva, underscores, quotes,
-    and repeated whitespace.
-    """
+    """Clean a candidate organism/species string."""
     value = value.strip().strip('"').strip("'")
 
     if "://" in value:
@@ -185,11 +178,7 @@ def normalize_name_for_lookup(name: str) -> str:
 
 
 def extract_binomial_or_trinomial(text: str) -> Optional[str]:
-    """
-    Extract a plausible Latin binomial or trinomial from free text.
-
-    This is a fallback for headers without explicit [organism=...] metadata.
-    """
+    """Extract a plausible Latin binomial or trinomial from free text."""
     cleaned = re.sub(r"\[[^\]]+\]", " ", text)
     cleaned = cleaned.replace("_", " ")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -278,12 +267,7 @@ def row_value(row: dict[str, str], column_map: dict[str, str], desired_column: s
 
 
 def load_taxonomy_hierarchy(path: Optional[Path]) -> TaxonomyHierarchy:
-    """
-    Load an optional fish taxonomy hierarchy CSV.
-
-    Expected useful columns are Species, Genus, Subfamily, Family, Order, Class,
-    and SuperClass. Column names are matched case-insensitively.
-    """
+    """Load an optional fish taxonomy hierarchy CSV."""
     hierarchy = TaxonomyHierarchy()
 
     if path is None:
@@ -310,9 +294,6 @@ def load_taxonomy_hierarchy(path: Optional[Path]) -> TaxonomyHierarchy:
             if record.species:
                 hierarchy.by_species[normalize_name_for_lookup(record.species)] = record
 
-            # Store the first genus-level record only. If a genus appears multiple
-            # times, family/order/class should normally be stable; preserving the
-            # first avoids later species overwriting earlier genus metadata.
             if record.genus:
                 genus_key = normalize_name_for_lookup(record.genus)
                 hierarchy.by_genus.setdefault(genus_key, record)
@@ -347,22 +328,63 @@ def bracket_escape(value: str) -> str:
 
 
 def sequence_id_from_header(header: str) -> str:
-    """
-    Return the sequence ID BLAST will see when -parse_seqids is used.
-
-    This is the first whitespace-delimited token after removing the leading >.
-    The taxid_map.tsv first column must match this token exactly.
-    """
+    """Return the first whitespace-delimited FASTA token without leading >."""
     return header.lstrip(">").strip().split()[0]
 
 
-def append_assignment_metadata(header: str, match: NameMatch) -> str:
+def sanitize_sequence_id(seqid: str) -> str:
     """
-    Append ePLACE metadata preserving the original custom organism name.
+    Convert a custom FASTA sequence ID into a BLAST-safe local ID.
 
-    This is deliberately placed in the description area, not the first sequence
-    token, so BLAST -parse_seqids behaviour remains stable.
+    NCBI BLAST treats pipe-delimited IDs as special accession syntax when
+    -parse_seqids is used. Replacing those separators avoids taxid_map mismatch
+    errors while keeping the ID readable.
     """
+    cleaned = seqid.strip()
+    cleaned = cleaned.replace("|+|", "_plus_")
+    cleaned = cleaned.replace("|-|", "_minus_")
+    cleaned = cleaned.replace("|", "_")
+    cleaned = cleaned.replace("+", "plus")
+    cleaned = cleaned.replace("-", "-")
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", cleaned)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+
+    if not cleaned:
+        cleaned = "seq"
+
+    if not re.match(r"^[A-Za-z0-9]", cleaned):
+        cleaned = f"seq_{cleaned}"
+
+    return cleaned
+
+
+def make_unique_seqid(seqid: str, seen: dict[str, int]) -> str:
+    """Ensure sanitized FASTA IDs are unique."""
+    if seqid not in seen:
+        seen[seqid] = 1
+        return seqid
+
+    seen[seqid] += 1
+    return f"{seqid}_{seen[seqid]}"
+
+
+def rewrite_header_seqid(header: str, new_seqid: str) -> str:
+    """Replace the first FASTA token with a BLAST-safe sequence ID."""
+    body = header.lstrip(">").rstrip()
+    parts = body.split(maxsplit=1)
+    rest = f" {parts[1]}" if len(parts) > 1 else ""
+    return f">{new_seqid}{rest}"
+
+
+def append_seqid_metadata(header: str, original_seqid: str, new_seqid: str) -> str:
+    """Preserve the original custom sequence ID when it was sanitized."""
+    if original_seqid == new_seqid:
+        return header
+    return f"{header} [eplace_original_seqid={bracket_escape(original_seqid)}]"
+
+
+def append_assignment_metadata(header: str, match: NameMatch) -> str:
+    """Append ePLACE metadata preserving the original custom organism name."""
     if not match.candidate_name:
         return header
 
@@ -411,11 +433,7 @@ def try_hierarchy_fallback(
     hierarchy: TaxonomyHierarchy,
     fallback_ranks: list[str],
 ) -> Optional[NameMatch]:
-    """
-    Try mapping candidate species/genus to an ancestor using taxonomy hierarchy.
-
-    The first ancestor rank whose name exists in names2id.tsv is used.
-    """
+    """Try mapping candidate species/genus to an ancestor using taxonomy hierarchy."""
     record = hierarchy.lookup(candidate_name)
     if record is None:
         return None
@@ -456,13 +474,7 @@ def resolve_taxid(
     custom_taxon_prefix: Optional[str] = None,
     custom_taxa_seen: Optional[dict[str, str]] = None,
 ) -> NameMatch:
-    """
-    Resolve candidate name to exact, genus, hierarchy-derived ancestor, or unmapped.
-
-    The fallback behaviour is intentionally conservative: the original species
-    name is preserved in ePLACE metadata while |taxid= points to a real NCBI
-    ancestor such as genus, family, order, class, or superclass.
-    """
+    """Resolve candidate name to exact, genus, hierarchy-derived ancestor, or unmapped."""
     if not candidate_name:
         return NameMatch(
             status="unmapped_no_candidate_name",
@@ -538,6 +550,7 @@ def process_fasta(
     replace_existing: bool = False,
     refresh_eplace_metadata: bool = False,
     custom_taxon_prefix: Optional[str] = None,
+    sanitize_seqids: bool = True,
 ) -> None:
     """Process FASTA headers and append usable taxids plus ePLACE metadata."""
     total = 0
@@ -548,6 +561,7 @@ def process_fasta(
     unresolved = 0
     taxid_map_written = 0
     custom_taxa_seen: dict[str, str] = {}
+    seen_seqids: dict[str, int] = {}
 
     output_fasta.parent.mkdir(parents=True, exist_ok=True)
     report_tsv.parent.mkdir(parents=True, exist_ok=True)
@@ -562,6 +576,7 @@ def process_fasta(
         report_writer = csv.writer(rep, delimiter="\t")
         report_writer.writerow([
             "seq_id",
+            "original_seq_id",
             "status",
             "candidate_name",
             "assigned_taxid",
@@ -582,7 +597,9 @@ def process_fasta(
 
             total += 1
             original_header = line.rstrip("\n")
-            seq_id = sequence_id_from_header(original_header)
+            original_seqid = sequence_id_from_header(original_header)
+            base_seqid = sanitize_sequence_id(original_seqid) if sanitize_seqids else original_seqid
+            seq_id = make_unique_seqid(base_seqid, seen_seqids)
 
             current_taxid = existing_taxid(original_header)
             candidate_name, method = extract_name_from_header(original_header)
@@ -590,6 +607,9 @@ def process_fasta(
             working_header = original_header
             if refresh_eplace_metadata:
                 working_header = strip_eplace_metadata(working_header)
+
+            working_header = rewrite_header_seqid(working_header, seq_id)
+            working_header = append_seqid_metadata(working_header, original_seqid, seq_id)
 
             if current_taxid and not replace_existing:
                 already_had_taxid += 1
@@ -612,6 +632,7 @@ def process_fasta(
 
                 report_writer.writerow([
                     seq_id,
+                    original_seqid,
                     match.status,
                     match.candidate_name,
                     match.assigned_taxid,
@@ -661,6 +682,7 @@ def process_fasta(
             out.write(working_header + "\n")
             report_writer.writerow([
                 seq_id,
+                original_seqid,
                 match.status,
                 match.candidate_name,
                 match.assigned_taxid,
@@ -705,27 +727,15 @@ def main() -> int:
             "writes a BLAST-compatible taxid_map.tsv."
         )
     )
-    parser.add_argument(
-        "-i",
-        "--input-fasta",
-        required=True,
-        type=Path,
-        help="Input FASTA file.",
-    )
+    parser.add_argument("-i", "--input-fasta", required=True, type=Path, help="Input FASTA file.")
     parser.add_argument(
         "-o",
         "--output-fasta",
         required=True,
         type=Path,
-        help="Output FASTA file with |taxid= appended where possible.",
+        help="Output FASTA file with BLAST-safe IDs and |taxid= appended where possible.",
     )
-    parser.add_argument(
-        "-n",
-        "--names2id",
-        required=True,
-        type=Path,
-        help="Two-column TSV: scientific_name<TAB>taxid.",
-    )
+    parser.add_argument("-n", "--names2id", required=True, type=Path, help="Two-column TSV: scientific_name<TAB>taxid.")
     parser.add_argument(
         "-r",
         "--report-tsv",
@@ -760,25 +770,23 @@ def main() -> int:
             "Default: Family,Order,Class,SuperClass"
         ),
     )
-    parser.add_argument(
-        "--replace-existing",
-        action="store_true",
-        help="Replace existing |taxid= values instead of preserving them.",
-    )
+    parser.add_argument("--replace-existing", action="store_true", help="Replace existing |taxid= values instead of preserving them.")
     parser.add_argument(
         "--refresh-eplace-metadata",
         action="store_true",
-        help=(
-            "Remove old [eplace_*] metadata fields and rewrite them. Useful when "
-            "rerunning this script on a previously annotated FASTA."
-        ),
+        help="Remove old [eplace_*] metadata fields and rewrite them.",
     )
     parser.add_argument(
         "--custom-taxon-prefix",
         default="CUSTOM_",
+        help="Prefix for unresolved custom taxa in the report/header metadata. These labels are not appended as |taxid=.",
+    )
+    parser.add_argument(
+        "--keep-original-seqids",
+        action="store_true",
         help=(
-            "Prefix for unresolved custom taxa in the report/header metadata. "
-            "These labels are not appended as |taxid=. Default: CUSTOM_"
+            "Do not sanitize the first FASTA token. Not recommended for pipe-delimited NBDL IDs "
+            "when using makeblastdb -parse_seqids."
         ),
     )
 
@@ -800,6 +808,7 @@ def main() -> int:
         replace_existing=args.replace_existing,
         refresh_eplace_metadata=args.refresh_eplace_metadata,
         custom_taxon_prefix=args.custom_taxon_prefix,
+        sanitize_seqids=not args.keep_original_seqids,
     )
 
     return 0
