@@ -46,12 +46,15 @@ Important:
 - By default, the first FASTA token is sanitized to avoid BLAST -parse_seqids
   interpreting pipe characters as special accession syntax. The original first
   token is preserved in [eplace_original_seqid=...].
+- BLAST local IDs must be 50 characters or shorter. Sanitized IDs longer than
+  50 characters are truncated and given a short hash suffix to preserve uniqueness.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,6 +96,8 @@ HEADER_METADATA_KEYS = [
 ]
 
 DEFAULT_HIERARCHY_FALLBACK_RANKS = ["Family", "Order", "Class", "SuperClass"]
+MAX_BLAST_LOCAL_ID_LENGTH = 50
+HASH_SUFFIX_LENGTH = 10
 
 
 @dataclass
@@ -332,20 +337,36 @@ def sequence_id_from_header(header: str) -> str:
     return header.lstrip(">").strip().split()[0]
 
 
+def shorten_blast_local_id(seqid: str, max_length: int = MAX_BLAST_LOCAL_ID_LENGTH) -> str:
+    """
+    Ensure a BLAST local ID is no longer than max_length.
+
+    BLAST local IDs are limited to 50 characters. If the sanitized ID is longer,
+    keep a readable prefix and append a deterministic short hash derived from the
+    full sanitized ID.
+    """
+    if len(seqid) <= max_length:
+        return seqid
+
+    hash_suffix = hashlib.md5(seqid.encode("utf-8")).hexdigest()[:HASH_SUFFIX_LENGTH]
+    prefix_length = max_length - HASH_SUFFIX_LENGTH - 1
+    prefix = seqid[:prefix_length].rstrip("_.-")
+    return f"{prefix}_{hash_suffix}"
+
+
 def sanitize_sequence_id(seqid: str) -> str:
     """
     Convert a custom FASTA sequence ID into a BLAST-safe local ID.
 
     NCBI BLAST treats pipe-delimited IDs as special accession syntax when
     -parse_seqids is used. Replacing those separators avoids taxid_map mismatch
-    errors while keeping the ID readable.
+    errors while keeping the ID readable. The final ID is capped at 50 chars.
     """
     cleaned = seqid.strip()
     cleaned = cleaned.replace("|+|", "_plus_")
     cleaned = cleaned.replace("|-|", "_minus_")
     cleaned = cleaned.replace("|", "_")
     cleaned = cleaned.replace("+", "plus")
-    cleaned = cleaned.replace("-", "-")
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", cleaned)
     cleaned = re.sub(r"_+", "_", cleaned).strip("_")
 
@@ -355,17 +376,19 @@ def sanitize_sequence_id(seqid: str) -> str:
     if not re.match(r"^[A-Za-z0-9]", cleaned):
         cleaned = f"seq_{cleaned}"
 
-    return cleaned
+    return shorten_blast_local_id(cleaned)
 
 
 def make_unique_seqid(seqid: str, seen: dict[str, int]) -> str:
-    """Ensure sanitized FASTA IDs are unique."""
+    """Ensure sanitized FASTA IDs are unique and still <=50 characters."""
     if seqid not in seen:
         seen[seqid] = 1
         return seqid
 
     seen[seqid] += 1
-    return f"{seqid}_{seen[seqid]}"
+    suffix = f"_{seen[seqid]}"
+    max_prefix = MAX_BLAST_LOCAL_ID_LENGTH - len(suffix)
+    return f"{seqid[:max_prefix].rstrip('_.-')}{suffix}"
 
 
 def rewrite_header_seqid(header: str, new_seqid: str) -> str:
@@ -598,7 +621,7 @@ def process_fasta(
             total += 1
             original_header = line.rstrip("\n")
             original_seqid = sequence_id_from_header(original_header)
-            base_seqid = sanitize_sequence_id(original_seqid) if sanitize_seqids else original_seqid
+            base_seqid = sanitize_sequence_id(original_seqid) if sanitize_seqids else shorten_blast_local_id(original_seqid)
             seq_id = make_unique_seqid(base_seqid, seen_seqids)
 
             current_taxid = existing_taxid(original_header)
@@ -786,7 +809,7 @@ def main() -> int:
         action="store_true",
         help=(
             "Do not sanitize the first FASTA token. Not recommended for pipe-delimited NBDL IDs "
-            "when using makeblastdb -parse_seqids."
+            "when using makeblastdb -parse_seqids. IDs are still capped at 50 characters."
         ),
     )
 
