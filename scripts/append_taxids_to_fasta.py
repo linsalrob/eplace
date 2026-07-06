@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-Append usable NCBI taxids to custom reference FASTA headers.
+Append usable NCBI taxids to custom reference FASTA headers and write a BLAST taxid map.
 
 This utility is intended for custom reference databases such as CSIRO/NBDL,
 BOLD, institutional FASTA exports, or mixed curated databases where sequence
@@ -18,6 +18,12 @@ Resolution ladder:
 5. If no valid NCBI ancestor can be found, preserve the custom organism name and
    assign a stable custom label in metadata/report, but do not append fake
    |taxid= values.
+
+The script writes three outputs:
+
+1. Rewritten FASTA with ePLACE metadata and usable |taxid= annotations where possible.
+2. Report TSV describing exact, fallback, and unresolved mappings.
+3. BLAST taxid map TSV, defaulting to taxid_map.tsv beside the output FASTA.
 
 Expected names2id.tsv format:
 
@@ -40,6 +46,9 @@ Important:
 - For custom species absent from NCBI, the script preserves the original name in
   [eplace_original_organism=...] even when |taxid= points to a conservative
   genus/family/order/class/superclass ancestor.
+- The taxid_map.tsv file is what makeblastdb needs for -taxid_map. The |taxid=
+  annotation in the FASTA header is useful metadata, but BLAST does not reliably
+  convert arbitrary header text into internal sequence taxids without a taxid map.
 """
 
 from __future__ import annotations
@@ -337,6 +346,16 @@ def bracket_escape(value: str) -> str:
     return value.replace("]", ")").replace("[", "(").strip()
 
 
+def sequence_id_from_header(header: str) -> str:
+    """
+    Return the sequence ID BLAST will see when -parse_seqids is used.
+
+    This is the first whitespace-delimited token after removing the leading >.
+    The taxid_map.tsv first column must match this token exactly.
+    """
+    return header.lstrip(">").strip().split()[0]
+
+
 def append_assignment_metadata(header: str, match: NameMatch) -> str:
     """
     Append ePLACE metadata preserving the original custom organism name.
@@ -512,6 +531,7 @@ def process_fasta(
     output_fasta: Path,
     names2id: dict[str, str],
     report_tsv: Path,
+    taxid_map: Path,
     *,
     taxonomy_hierarchy: Optional[TaxonomyHierarchy] = None,
     hierarchy_fallback_ranks: Optional[list[str]] = None,
@@ -526,12 +546,19 @@ def process_fasta(
     mapped_genus = 0
     mapped_hierarchy = 0
     unresolved = 0
+    taxid_map_written = 0
     custom_taxa_seen: dict[str, str] = {}
 
     output_fasta.parent.mkdir(parents=True, exist_ok=True)
     report_tsv.parent.mkdir(parents=True, exist_ok=True)
+    taxid_map.parent.mkdir(parents=True, exist_ok=True)
 
-    with input_fasta.open() as inp, output_fasta.open("w") as out, report_tsv.open("w") as rep:
+    with (
+        input_fasta.open() as inp,
+        output_fasta.open("w") as out,
+        report_tsv.open("w") as rep,
+        taxid_map.open("w") as taxmap,
+    ):
         report_writer = csv.writer(rep, delimiter="\t")
         report_writer.writerow([
             "seq_id",
@@ -543,6 +570,7 @@ def process_fasta(
             "hierarchy_match",
             "custom_label",
             "extraction_method",
+            "taxid_map_written",
             "original_header",
             "new_header",
         ])
@@ -554,7 +582,7 @@ def process_fasta(
 
             total += 1
             original_header = line.rstrip("\n")
-            seq_id = original_header.lstrip(">").split()[0]
+            seq_id = sequence_id_from_header(original_header)
 
             current_taxid = existing_taxid(original_header)
             candidate_name, method = extract_name_from_header(original_header)
@@ -579,6 +607,9 @@ def process_fasta(
                     working_header = append_assignment_metadata(working_header, match)
 
                 out.write(working_header + "\n")
+                taxmap.write(f"{seq_id}\t{current_taxid}\n")
+                taxid_map_written += 1
+
                 report_writer.writerow([
                     seq_id,
                     match.status,
@@ -589,6 +620,7 @@ def process_fasta(
                     match.hierarchy_match,
                     match.custom_label,
                     method,
+                    "Yes",
                     original_header,
                     working_header,
                 ])
@@ -620,6 +652,12 @@ def process_fasta(
                 replace_existing=replace_existing,
             )
 
+            taxid_map_status = "No"
+            if match.assigned_taxid:
+                taxmap.write(f"{seq_id}\t{match.assigned_taxid}\n")
+                taxid_map_written += 1
+                taxid_map_status = "Yes"
+
             out.write(working_header + "\n")
             report_writer.writerow([
                 seq_id,
@@ -631,6 +669,7 @@ def process_fasta(
                 match.hierarchy_match,
                 match.custom_label,
                 method,
+                taxid_map_status,
                 original_header,
                 working_header,
             ])
@@ -641,8 +680,10 @@ def process_fasta(
     print(f"Mapped by genus fallback: {mapped_genus}")
     print(f"Mapped by taxonomy hierarchy fallback: {mapped_hierarchy}")
     print(f"Unresolved/no usable ancestor: {unresolved}")
+    print(f"Taxid map rows written: {taxid_map_written}")
     print(f"Wrote FASTA: {output_fasta}")
     print(f"Wrote report: {report_tsv}")
+    print(f"Wrote BLAST taxid map: {taxid_map}")
 
 
 def parse_fallback_ranks(value: str) -> list[str]:
@@ -651,11 +692,17 @@ def parse_fallback_ranks(value: str) -> list[str]:
     return ranks or DEFAULT_HIERARCHY_FALLBACK_RANKS
 
 
+def default_taxid_map_path(output_fasta: Path) -> Path:
+    """Default to taxid_map.tsv beside the rewritten FASTA."""
+    return output_fasta.parent / "taxid_map.tsv"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Append NCBI taxids to custom FASTA headers using organism/species "
-            "names, with genus and optional taxonomy-hierarchy fallback."
+            "names, with genus and optional taxonomy-hierarchy fallback. Also "
+            "writes a BLAST-compatible taxid_map.tsv."
         )
     )
     parser.add_argument(
@@ -685,6 +732,15 @@ def main() -> int:
         required=True,
         type=Path,
         help="Output TSV report of exact, genus-fallback, hierarchy-fallback, and unmapped records.",
+    )
+    parser.add_argument(
+        "--taxid-map",
+        default=None,
+        type=Path,
+        help=(
+            "Output BLAST taxid map TSV. Default: taxid_map.tsv beside the output FASTA. "
+            "Use this file with makeblastdb -taxid_map."
+        ),
     )
     parser.add_argument(
         "--taxonomy-hierarchy",
@@ -731,12 +787,14 @@ def main() -> int:
     names2id = load_names2id(args.names2id)
     taxonomy_hierarchy = load_taxonomy_hierarchy(args.taxonomy_hierarchy)
     hierarchy_fallback_ranks = parse_fallback_ranks(args.hierarchy_fallback_ranks)
+    taxid_map = args.taxid_map or default_taxid_map_path(args.output_fasta)
 
     process_fasta(
         input_fasta=args.input_fasta,
         output_fasta=args.output_fasta,
         names2id=names2id,
         report_tsv=args.report_tsv,
+        taxid_map=taxid_map,
         taxonomy_hierarchy=taxonomy_hierarchy,
         hierarchy_fallback_ranks=hierarchy_fallback_ranks,
         replace_existing=args.replace_existing,
