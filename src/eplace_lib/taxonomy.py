@@ -1257,6 +1257,58 @@ def make_decision_classification(
 
     return decision
 
+def make_classification_source(classification: dict) -> str:
+    """
+    Summarise the main evidence source used for the query-level classification.
+
+    This column is intended as a reader-friendly interpretation field for the
+    classification TSV. It compresses the BLAST, tree, placement, and raw-hit
+    evidence columns into one high-level category.
+    """
+    try:
+        blast_hits = int(classification.get("blast_hits", 0))
+    except Exception:
+        blast_hits = 0
+
+    try:
+        raw_search_hits = int(classification.get("raw_search_hits", 0))
+    except Exception:
+        raw_search_hits = 0
+
+    tree_agrees = classification.get("tree_agrees_with_decision", "N/A")
+    tree_based = classification.get("tree_based_classification", "No")
+    tree_topology_status = classification.get("tree_topology_status", "No tree")
+    placement_route = classification.get("placement_route", "no_evidence")
+    raw_evidence_status = classification.get("raw_evidence_status", "no_detectable_match")
+
+    has_tree_context = (
+        tree_based == "Yes"
+        or tree_topology_status in {
+            "Single reference neighbour",
+            "Consistent topology",
+            "Mixed topology",
+        }
+    )
+
+    if blast_hits > 0:
+        if tree_agrees == "Yes":
+            return "BLAST + Tree agreement"
+        if tree_agrees == "No":
+            return "BLAST + Tree disagreement"
+        if has_tree_context:
+            return "BLAST + Tree context"
+        return "BLAST only"
+
+    if placement_route in {"placement_hit", "rescue_hit", "backbone_only"}:
+        if has_tree_context:
+            return "Placement + Tree"
+        return "Placement only"
+
+    if raw_search_hits > 0 or raw_evidence_status == "subthreshold_match":
+        return "Raw/subthreshold evidence only"
+
+    return "No evidence"
+
 def generate_classification_summary(
     sequences: dict[str, str],
     blast_hits: List[BlastHit],
@@ -1395,7 +1447,8 @@ def generate_classification_summary(
             'phylogenetic_placement_attempted': 'No',
             'phylogenetic_placement_reason': 'No placement plan was available.',
             'appears_in_multiple_groups': 'No',
-            'has_classification': 'Yes'
+            'has_classification': 'Yes',
+            'classification_source': 'No evidence'
         }
         
         raw_evidence = make_raw_blast_evidence(
@@ -1432,6 +1485,7 @@ def generate_classification_summary(
 
             # Do not continue yet if placement/tree context exists.
             if not tree_context_hits:
+                classification['classification_source'] = make_classification_source(classification)
                 summary_data.append(classification)
                 continue
 
@@ -1604,6 +1658,8 @@ def generate_classification_summary(
         )
 
         classification.update(decision)
+
+        classification['classification_source'] = make_classification_source(classification)
         
         summary_data.append(classification)
     
@@ -1675,7 +1731,8 @@ def generate_classification_summary(
                 'placement_best_taxon_name',
                 'phylogenetic_placement_attempted',
                 'phylogenetic_placement_reason',
-                'has_classification'
+                'has_classification',
+                'classification_source'
             ]
             f.write('\t'.join(headers) + '\n')
             
@@ -1745,7 +1802,8 @@ def generate_classification_summary(
                     entry['placement_best_taxon_name'],
                     entry['phylogenetic_placement_attempted'],
                     entry['phylogenetic_placement_reason'],
-                    entry['has_classification']
+                    entry['has_classification'],
+                    entry['classification_source']
                 ]
                 f.write('\t'.join(row) + '\n')
         
