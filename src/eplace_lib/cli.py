@@ -869,7 +869,9 @@ def grouped_command(args):
     # Create output directory
     args.output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Set default output classification file if not provided
+    # Derive the base output name from the input FASTA filename.
+    base_name = args.query_fasta.stem
+
     for ext in [".fasta", ".fa", ".fna", ".ffn", ".faa", ".frn"]:
         if base_name.endswith(ext):
             base_name = base_name[:-len(ext)]
@@ -892,7 +894,7 @@ def grouped_command(args):
         args.output_taxonomy = (
             args.output_dir / args.output_taxonomy
         )
-    
+
     skip_existing = not args.overwrite_existing_blast
 
     # Determine effective MMseqs2 database name early so it can be logged
