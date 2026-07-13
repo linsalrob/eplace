@@ -870,15 +870,28 @@ def grouped_command(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
     
     # Set default output classification file if not provided
+    for ext in [".fasta", ".fa", ".fna", ".ffn", ".faa", ".frn"]:
+        if base_name.endswith(ext):
+            base_name = base_name[:-len(ext)]
+            break
+
     if args.output_classification is None:
-        base_name = args.query_fasta.stem
-        for ext in ['.fasta', '.fa', '.fna', '.ffn', '.faa', '.frn']:
-            if base_name.endswith(ext):
-                base_name = base_name[:-len(ext)]
-                break
-        args.output_classification = args.output_dir / f"{base_name}_classification.tsv"
-    if not args.output_classification.is_absolute():
-        args.output_classification = args.output_dir / args.output_classification
+        args.output_classification = (
+            args.output_dir / f"{base_name}_classification.tsv"
+        )
+    elif not args.output_classification.is_absolute():
+        args.output_classification = (
+            args.output_dir / args.output_classification
+        )
+
+    if args.output_taxonomy is None:
+        args.output_taxonomy = (
+            args.output_dir / f"{base_name}_taxonomy.tsv"
+        )
+    elif not args.output_taxonomy.is_absolute():
+        args.output_taxonomy = (
+            args.output_dir / args.output_taxonomy
+        )
     
     skip_existing = not args.overwrite_existing_blast
 
@@ -894,7 +907,8 @@ def grouped_command(args):
     logger.info(f"Representative rank: {args.rank}")
     logger.info(f"Grouping rank: {args.group_rank}")
     logger.info(f"Tree labeling rank: {args.tree_label_rank}")
-    logger.info(f"Classification output file: {args.output_classification}")
+    logger.info(f"Analysis-ready taxonomy output file: {args.output_taxonomy}")
+    logger.info(f"Detailed classification output file: {args.output_classification}")
     logger.info(f"Min identity: {args.min_identity}%")
     logger.info(f"Min coverage: {args.min_coverage}%")
     logger.info(f"Threads: {args.num_threads}")
@@ -1268,6 +1282,7 @@ def grouped_command(args):
             sequences=sequences,
             blast_hits=filtered_hits,
             output_file=args.output_classification,
+            assignment_output_file=args.output_taxonomy,
             rank=args.rank,
             group_rank=args.group_rank,
             tree_label_rank=args.tree_label_rank,
@@ -1911,6 +1926,15 @@ Notes:
         type=int,
         default=50,
         help='Maximum coordinate difference for alignment consistency (default: 50)'
+    )
+    grouped_parser.add_argument(
+        "--output-classification",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the detailed classification evidence TSV. "
+            "Defaults to <output-dir>/<query-name>_classification.tsv."
+        ),
     )
     grouped_parser.add_argument(
         "--output-taxonomy",
