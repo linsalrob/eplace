@@ -392,13 +392,31 @@ def blast_command(args):
     # Set default output classification file if not provided
     if args.output_classification is None:
         base_name = args.query_fasta.stem
-        for ext in ['.fasta', '.fa', '.fna', '.ffn', '.faa', '.frn']:
+
+        for ext in [".fasta", ".fa", ".fna", ".ffn", ".faa", ".frn"]:
             if base_name.endswith(ext):
                 base_name = base_name[:-len(ext)]
                 break
-        args.output_classification = args.output_dir / f"{base_name}_classification.tsv"
-    if not args.output_classification.is_absolute():
-        args.output_classification = args.output_dir / args.output_classification
+
+        if args.output_classification is None:
+            args.output_classification = (
+                args.output_dir / f"{base_name}_classification.tsv"
+            )
+
+        if not args.output_classification.is_absolute():
+            args.output_classification = (
+                args.output_dir / args.output_classification
+            )
+
+        if args.output_taxonomy is None:
+            args.output_taxonomy = (
+                args.output_dir / f"{base_name}_taxonomy.tsv"
+            )
+
+        if not args.output_taxonomy.is_absolute():
+            args.output_taxonomy = (
+                args.output_dir / args.output_taxonomy
+            )
     
     skip_existing = not args.overwrite_existing_blast
 
@@ -681,8 +699,9 @@ def blast_command(args):
             sequences=sequences,
             blast_hits=filtered_hits,
             output_file=args.output_classification,
+            assignment_output_file=args.output_taxonomy,
             rank=args.rank,
-            group_rank=args.rank,
+            group_rank=args.group_rank,
             tree_label_rank=args.tree_label_rank,
             tree_files=tree_files_map if tree_files_map else None,
             raw_blast_hits=raw_blast_hits,
@@ -1258,7 +1277,13 @@ def grouped_command(args):
         )
         
         if success:
-            logger.info(f"✓ Classification summary: {args.output_classification}")
+            logger.info(
+                f"✓ Analysis-ready taxonomy: {args.output_taxonomy}"
+            )
+            logger.info(
+                f"✓ Detailed classification evidence: "
+                f"{args.output_classification}"
+            )
         else:
             logger.warning("Failed to generate classification summary")
     except Exception as e:
@@ -1888,10 +1913,16 @@ Notes:
         help='Maximum coordinate difference for alignment consistency (default: 50)'
     )
     grouped_parser.add_argument(
-        '--output-classification',
+        "--output-taxonomy",
         type=Path,
         default=None,
-        help='Path to output classification TSV file'
+        help=(
+            "Path for the compact analysis-ready taxonomy TSV. "
+            "Defaults to <output-dir>/<query-name>_taxonomy.tsv. "
+            "Only High- and Moderate-confidence classifications are "
+            "reported as formal assignments; Low-confidence results "
+            "remain Unclassified."
+        ),
     )
     _add_log_level_argument(grouped_parser)
     

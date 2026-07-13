@@ -1309,10 +1309,108 @@ def make_classification_source(classification: dict) -> str:
 
     return "No evidence"
 
+def make_analysis_assignment(classification: dict) -> dict:
+    """
+    Create the compact, analysis-ready assignment record.
+
+    Only High- and Moderate-confidence decisions are emitted as formal
+    taxonomic assignments. Low-confidence, subthreshold, and no-evidence
+    results remain unclassified.
+
+    The detailed classification.tsv retains the complete evidence and
+    provisional decision for inspection.
+    """
+    confidence = classification.get(
+        "decision_confidence",
+        "No classification",
+    )
+
+    decision_rank = classification.get("decision_rank", "N/A")
+    decision_taxid = classification.get("decision_taxid", "N/A")
+    decision_name = classification.get("decision_name", "N/A")
+
+    accepted_confidences = {"High", "Moderate"}
+
+    has_accepted_assignment = (
+        confidence in accepted_confidences
+        and decision_rank not in {None, "", "N/A"}
+        and decision_name not in {None, "", "N/A"}
+    )
+
+    if has_accepted_assignment:
+        assignment_rank = decision_rank
+        assignment_taxid = decision_taxid
+        assignment_name = decision_name
+    else:
+        assignment_rank = "N/A"
+        assignment_taxid = "N/A"
+        assignment_name = "Unclassified"
+
+    return {
+        "query_id": classification["query_id"],
+        "assignment_rank": assignment_rank,
+        "assignment_taxid": assignment_taxid,
+        "assignment_name": assignment_name,
+        "classification_confidence": confidence,
+        "classification_source": classification.get(
+            "classification_source",
+            "No evidence",
+        ),
+    }
+
+def write_analysis_assignments(
+    summary_data: list[dict],
+    output_file: Path,
+) -> bool:
+    """
+    Write the compact analysis-ready taxonomy assignment table.
+    """
+    headers = [
+        "query_id",
+        "assignment_rank",
+        "assignment_taxid",
+        "assignment_name",
+        "classification_confidence",
+        "classification_source",
+    ]
+
+    try:
+        with open(output_file, "w") as handle:
+            handle.write("\t".join(headers) + "\n")
+
+            for classification in summary_data:
+                assignment = make_analysis_assignment(classification)
+
+                row = [
+                    str(assignment["query_id"]),
+                    str(assignment["assignment_rank"]),
+                    str(assignment["assignment_taxid"]),
+                    str(assignment["assignment_name"]),
+                    str(assignment["classification_confidence"]),
+                    str(assignment["classification_source"]),
+                ]
+
+                handle.write("\t".join(row) + "\n")
+
+        logger.info(
+            "Successfully wrote analysis-ready assignments for %d queries to %s",
+            len(summary_data),
+            output_file,
+        )
+        return True
+
+    except Exception:
+        logger.exception(
+            "Error writing analysis-ready assignment TSV: %s",
+            output_file,
+        )
+        return False
+
 def generate_classification_summary(
     sequences: dict[str, str],
     blast_hits: List[BlastHit],
     output_file: Path,
+    assignment_output_file: Optional[Path] = None,
     rank: str = "genus",
     group_rank: str = "class",
     tree_label_rank: str = "genus",
@@ -1807,7 +1905,21 @@ def generate_classification_summary(
                 ]
                 f.write('\t'.join(row) + '\n')
         
-        logger.info(f"Successfully wrote classification summary for {len(summary_data)} queries to {output_file}")
+        logger.info(
+            "Successfully wrote detailed classification evidence for %d queries to %s",
+            len(summary_data),
+            output_file,
+        )
+
+        if assignment_output_file is not None:
+            assignment_success = write_analysis_assignments(
+                summary_data=summary_data,
+                output_file=assignment_output_file,
+            )
+
+            if not assignment_success:
+                return False
+
         return True
         
     except Exception as e:
