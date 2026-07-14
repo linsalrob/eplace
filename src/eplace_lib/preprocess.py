@@ -17,7 +17,7 @@ import sys
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, TextIO
+from typing import Iterator, List, Optional, TextIO, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ def _open_text(path: Path, mode: str = "rt") -> TextIO:
     return path.open(mode, encoding="utf-8", newline="")
 
 
-def _fastq_records(handle: TextIO, source: Path) -> Iterator[tuple[str, str, str, str]]:
+def _fastq_records(handle: TextIO, source: Path) -> Iterator[Tuple[str, str, str, str]]:
     while True:
         header = handle.readline()
         if not header:
@@ -59,7 +59,7 @@ def _read_id(header: str) -> str:
     return token
 
 
-def _hamming(observed: str, expected: str) -> int | None:
+def _hamming(observed: str, expected: str) -> Optional[int]:
     observed = observed.upper()
     expected = expected.upper()
     if len(observed) < len(expected):
@@ -68,7 +68,7 @@ def _hamming(observed: str, expected: str) -> int | None:
     return sum(a != b for a, b in zip(observed, expected))
 
 
-def _load_sample_sheet(path: Path) -> list[SampleIndex]:
+def _load_sample_sheet(path: Path) -> List[SampleIndex]:
     with path.open("rt", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         required = {"sample_id", "index1", "index2"}
@@ -98,8 +98,8 @@ def _load_sample_sheet(path: Path) -> list[SampleIndex]:
     return samples
 
 
-def _match_sample(index1: str, index2: str, samples: list[SampleIndex], mismatches: int) -> str | None:
-    candidates: list[tuple[int, str]] = []
+def _match_sample(index1: str, index2: str, samples: List[SampleIndex], mismatches: int) -> Optional[str]:
+    candidates: List[Tuple[int, str]] = []
     for sample in samples:
         d1 = _hamming(index1, sample.index1)
         d2 = _hamming(index2, sample.index2)
@@ -114,7 +114,7 @@ def _match_sample(index1: str, index2: str, samples: list[SampleIndex], mismatch
     return candidates[0][1]
 
 
-def demultiplex(args: argparse.Namespace, samples: list[SampleIndex], output_dir: Path) -> Path:
+def demultiplex(args: argparse.Namespace, samples: List[SampleIndex], output_dir: Path) -> Path:
     demux_dir = output_dir / "01_demultiplexed"
     demux_dir.mkdir(parents=True, exist_ok=True)
     counts = {sample.sample_id: 0 for sample in samples}
@@ -173,7 +173,7 @@ def demultiplex(args: argparse.Namespace, samples: list[SampleIndex], output_dir
     return demux_dir
 
 
-def trim_primers(args: argparse.Namespace, samples: list[SampleIndex], demux_dir: Path, output_dir: Path) -> Path:
+def trim_primers(args: argparse.Namespace, samples: List[SampleIndex], demux_dir: Path, output_dir: Path) -> Path:
     trimmed_dir = output_dir / "02_trimmed"
     log_dir = output_dir / "logs" / "cutadapt"
     trimmed_dir.mkdir(parents=True, exist_ok=True)
@@ -242,7 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = build_parser()
     args = parser.parse_args(argv)
