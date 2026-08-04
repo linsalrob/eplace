@@ -504,69 +504,72 @@ class IQTreeBuilder:
     ) -> bool:
         """
         Relabel tree nodes with taxonomic names.
+        
+        This reads a Newick tree file and replaces sequence IDs with taxonomic names
+        from the BLAST hits.
+        
+        Args:
+            tree_file: Path to input tree file (Newick format)
+            blast_hits: List of BlastHit objects with taxonomic information
+            output_tree: Path to output tree file with relabeled nodes
+            taxonomic_rank: the taxonomic rank to use for relabeling (e.g., "genus")
+            
+        Returns:
+            True if successful, False otherwise
         """
         try:
+            # Create mapping of sequence accession to taxonomic name
+            # Trees will have accessions (e.g., MZ387488.1) not full IDs
             label_map = {}
-
             for hit in blast_hits:
-                label = hit.subject_id
-
+                label = "unknown"
                 if isinstance(hit.subject_taxonomy, dict) and taxonomic_rank in hit.subject_taxonomy:
                     label = hit.subject_taxonomy[taxonomic_rank][1]
+                label_map[hit.subject_id] = label
+                if label:
+                    # Clean up the label for tree format (Newick format constraints)
+                    # Replace spaces, colons, parentheses, commas, and semicolons
+                    clean_label = (label.replace(' ', '_')
+                                  .replace(':', '_')
+                                  .replace('(', '_')
+                                  .replace(')', '_')
+                                  .replace(',', '_')
+                                  .replace(';', '_'))
+                    # Use accession for mapping since that's what appears in trees
+                    accession = hit.get_accession()
+                    label_map[accession] = clean_label
 
-                clean_label = (
-                    label.replace(" ", "_")
-                         .replace(":", "_")
-                         .replace("(", "_")
-                         .replace(")", "_")
-                         .replace(",", "_")
-                         .replace(";", "_")
-                         .replace("|", "_")
-                         .replace("/", "_")
-                )
-
-                label_map[hit.subject_id] = clean_label
-                label_map[hit.get_accession()] = clean_label
-
-                safe_subject_id = (
-                    hit.subject_id.replace("|", "_")
-                                  .replace("/", "_")
-                                  .replace(" ", "_")
-                )
-                label_map[safe_subject_id] = clean_label
-
-            with open(tree_file, "r") as f:
+            # Read the tree file
+            with open(tree_file, 'r') as f:
                 tree_string = f.read()
-
-            replacements = 0
-
-            for seq_id, tax_name in sorted(label_map.items(), key=lambda x: len(x[0]), reverse=True):
-                before = tree_string
-
+            
+            # Replace sequence IDs with taxonomic names
+            for seq_id, tax_name in label_map.items():
+                # Handle normal sequences (not reversed)
                 tree_string = tree_string.replace(f"({seq_id}:", f"({tax_name}:")
                 tree_string = tree_string.replace(f",{seq_id}:", f",{tax_name}:")
                 tree_string = tree_string.replace(f" {seq_id}:", f" {tax_name}:")
-
+                
+                # Handle sequences with _R_ prefix (reversed by MAFFT)
+                # MAFFT prepends _R_ to sequence IDs when it adjusts direction
+                # We need to remove _R_ to find the correct ID, then append "_R" to the label
+                # (using underscore to maintain Newick format compliance, representing " R")
                 reversed_seq_id = f"_R_{seq_id}"
                 reversed_label = f"{tax_name}_R"
-
                 tree_string = tree_string.replace(f"({reversed_seq_id}:", f"({reversed_label}:")
                 tree_string = tree_string.replace(f",{reversed_seq_id}:", f",{reversed_label}:")
                 tree_string = tree_string.replace(f" {reversed_seq_id}:", f" {reversed_label}:")
-
-                if tree_string != before:
-                    replacements += 1
-
-            with open(output_tree, "w") as f:
+            
+            # Write the relabeled tree
+            with open(output_tree, 'w') as f:
                 f.write(tree_string)
-
-            logger.info(f"Tree relabel replacements made: {replacements}")
-            logger.info(f"Tree relabeled with {len(label_map)} possible labels")
+            
+            logger.info(f"Tree relabeled with {len(label_map)} taxonomic names")
             logger.info(f"Relabeled tree saved to: {output_tree}")
             return True
-
+            
         except Exception as e:
-            logger.exception(f"Error relabeling tree: {e}")
+            logger.error(f"Error relabeling tree: {e}")
             return False
 
 
@@ -1061,12 +1064,12 @@ def create_grouped_fasta_with_queries(
     except Exception as e:
         logger.error(f"Error creating grouped FASTA: {e}")
         return False
-
     finally:
         # Clean up temporary file
         if temp_ref_fasta.exists():
             temp_ref_fasta.unlink()
-            
+
+
 def trim_grouped_sequences(
     input_fasta: Path,
     blast_hits: List[BlastHit],
@@ -1075,11 +1078,22 @@ def trim_grouped_sequences(
 ) -> bool:
     """
     Trim sequences in a grouped FASTA file based on BLAST hit coordinates.
+    
+    This is similar to trim_sequences_from_blast_hits but handles multiple queries.
+    
+    Args:
+        input_fasta: Path to input FASTA file with full-length sequences
+        blast_hits: List of BlastHit objects for all queries in the group
+        output_fasta: Path to output FASTA file with trimmed sequences
+        query_ids: List of query sequence IDs to include (untrimmed)
+        
+    Returns:
+        True if successful, False otherwise
     """
     try:
         # Read all sequences from the input FASTA
         sequences = FastaReader.read_fasta(input_fasta)
-
+        
         # Create a mapping of subject accession to blast hits
         hit_map = {}
         for hit in blast_hits:
@@ -1087,80 +1101,62 @@ def trim_grouped_sequences(
             if accession not in hit_map:
                 hit_map[accession] = []
             hit_map[accession].append(hit)
-
+        
         # For sequences with multiple hits, use the one with the best bit score
+        # This is consistent with the deduplication logic in create_grouped_fasta_with_queries
         best_hits = {}
         for accession, hits in hit_map.items():
             if len(hits) == 1:
                 best_hits[accession] = hits[0]
             else:
+                # Use the hit with the best bit score for consistency
                 best_hits[accession] = max(hits, key=lambda h: h.bit_score)
-
+        
         # Open output file
-        with open(output_fasta, "w") as out:
-            # First, write all query sequences untrimmed
+        with open(output_fasta, 'w') as out:
+            # First, write all query sequences (untrimmed)
             for query_id in query_ids:
                 if query_id in sequences:
                     query_seq = sequences[query_id]
                     out.write(f">{query_id}\n")
                     for i in range(0, len(query_seq), 60):
-                        out.write(query_seq[i:i + 60] + "\n")
+                        out.write(query_seq[i:i+60] + "\n")
                     logger.info(f"Added query sequence {query_id} ({len(query_seq)} bp)")
-
-            # Now process subject sequences, trimmed
+            
+            # Now process subject sequences (trimmed)
             for seq_id, sequence in sequences.items():
                 if seq_id in query_ids:
-                    continue
-
-                # The combined FASTA header may include a taxonomic label after whitespace.
-                # The first token must remain the original BLAST accession/NBDL ID.
+                    continue  # Skip queries, already written
+                
+                # Extract just the accession from the header (might have taxonomy info)
                 accession = seq_id.split()[0]
                 hit = best_hits.get(accession)
-
+                
                 if hit is None:
-                    logger.error(
-                        f"No BLAST hit found for sequence {accession}, data consistency issue"
-                    )
+                    logger.error(f"No BLAST hit found for sequence {accession}, data consistency issue")
                     continue
-
+                
+                # Trim the sequence based on subject coordinates
                 trimmed_seq = SequenceTrimmer.trim_sequence_by_coordinates(
                     sequence,
                     hit.subject_start,
                     hit.subject_end
                 )
-
-                # Rename only after trimming, so BLAST-coordinate matching is preserved.
-                taxid = hit.subject_taxid
-                tax_label = hit.subject_id
-
-                if isinstance(hit.subject_taxonomy, dict) and "species" in hit.subject_taxonomy:
-                    taxid, tax_label = hit.subject_taxonomy["species"]
-
-                safe_header = (
-                    f"{taxid}_{tax_label}"
-                    .replace(" ", "_")
-                    .replace(":", "_")
-                    .replace("(", "_")
-                    .replace(")", "_")
-                    .replace(",", "_")
-                    .replace(";", "_")
-                    .replace("|", "_")
-                    .replace("/", "_")
-                )
-
-                out.write(f">{safe_header}\n")
+                
+                # Write trimmed sequence
+                out.write(f">{seq_id}\n")
                 for i in range(0, len(trimmed_seq), 60):
-                    out.write(trimmed_seq[i:i + 60] + "\n")
-
+                    out.write(trimmed_seq[i:i+60] + "\n")
+                
                 logger.info(
-                    f"Trimmed {accession} as {safe_header} from {len(sequence)} bp "
-                    f"to {len(trimmed_seq)} bp (coords: {hit.subject_start}-{hit.subject_end})"
+                    f"Trimmed {accession} from {len(sequence)} bp to {len(trimmed_seq)} bp "
+                    f"(coords: {hit.subject_start}-{hit.subject_end})"
                 )
-
+        
         return True
-
+        
     except Exception as e:
-        logger.exception(f"Error trimming grouped sequences: {e}")
+        logger.error(f"Error trimming grouped sequences: {e}")
         return False
 
 

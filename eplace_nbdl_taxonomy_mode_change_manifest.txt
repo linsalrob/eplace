@@ -1,0 +1,870 @@
+ePLACE NBDL TAXONOMY MODE
+DRAFT CHANGE MANIFEST AND UPDATED USAGE GUIDE
+============================================================
+
+STATUS
+------
+Review draft only.
+This file has NOT been added to the GitHub repository.
+It is intended for internal review before the visible README or other public
+documentation is changed.
+
+Repository reviewed:
+https://github.com/mpdoane2/eplace/tree/nbdl-taxonomy-mode
+
+Package version recorded in pyproject.toml:
+0.1.8
+
+Purpose of this document:
+1. Record the major changes introduced during development of
+   nbdl-taxonomy-mode.
+2. Provide updated command examples that reflect the current working CLI.
+3. Identify documentation and implementation inconsistencies that should be
+   resolved before updating the public README.
+4. Provide a reviewable draft that can later be converted into README text,
+   release notes, or a formal CHANGELOG.
+
+
+============================================================
+1. OVERVIEW
+============================================================
+
+ePLACE stands for:
+
+environmental Phylogenetic Localisation and Clade Estimation
+
+ePLACE classifies environmental DNA and amplicon sequences by combining:
+
+1. Sequence similarity searching.
+2. Taxonomic information associated with reference hits.
+3. Representative-reference selection.
+4. Multiple-sequence alignment.
+5. Phylogenetic tree construction.
+6. Tree-informed evidence and final classification summaries.
+
+The nbdl-taxonomy-mode branch substantially expands the original BLAST-focused
+workflow. The working software now includes:
+
+- BLAST and MMseqs2 search backends.
+- Support for NCBI and custom reference databases.
+- Custom database operation without NCBI taxonomic identifiers.
+- Separation of strict classification thresholds from broader phylogenetic
+  placement and rescue thresholds.
+- Search database provenance reporting.
+- Detailed per-query classification evidence.
+- Grouped and individual phylogenetic workflows.
+- Optional combined-tree construction.
+- Experimental amplicon preprocessing code and editable shell workflows.
+
+
+============================================================
+2. MAJOR CHANGES INCLUDED IN NBDL-TAXONOMY-MODE
+============================================================
+
+2.1 BLAST and MMseqs2 backends
+------------------------------
+
+Sequence searching is no longer limited to BLAST.
+
+The following backends are available:
+
+- blast
+- mmseqs2
+
+Select the backend with:
+
+    --search-tool blast
+
+or:
+
+    --search-tool mmseqs2
+
+BLAST remains the default.
+
+MMseqs2-specific controls include:
+
+    --mmseqs-database
+    --mmseqs-db-path
+    --mmseqs-db-source
+    --mmseqs-sensitivity
+    --mmseqs-search-type
+    --mmseqs-memory-limit
+    --timeout
+
+The current default MMseqs2 sensitivity is:
+
+    5.7
+
+The current default MMseqs2 search type is:
+
+    3
+
+The current default MMseqs2 memory limit is:
+
+    400G
+
+IMPORTANT:
+An MMseqs2 database should ideally be created from the same sequence collection
+as the BLAST database when results are intended to be comparable. There is no
+official prebuilt MMseqs2 equivalent of NCBI core_nt supplied by ePLACE.
+
+
+2.2 Database provenance metadata
+--------------------------------
+
+Each search workflow records search provenance in:
+
+    search_metadata.json
+
+The file records:
+
+    search_backend
+    database_name
+    database_path
+    database_source
+
+For BLAST, database provenance can be specified using:
+
+    --blast-db-source
+
+For MMseqs2, provenance can be specified using:
+
+    --mmseqs-db-source
+
+This change improves reproducibility and makes it clear which reference corpus
+produced a classification.
+
+
+2.3 Custom reference database support
+-------------------------------------
+
+The taxonomy workflow has been expanded to support custom reference databases.
+
+The branch includes logic for:
+
+- Parsing custom headers.
+- Retaining custom subject identifiers.
+- Handling references with no NCBI taxid.
+- Falling back to subject identifiers when taxonomy is unavailable.
+- Supporting the special rank:
+
+      no_rank
+
+Use no_rank when the database contains meaningful sequence identifiers but no
+taxonomic identifiers that can be resolved through NCBI Taxonomy.
+
+Example:
+
+    eplace grouped query.fasta output_dir \
+        --database custom_database \
+        --blastdb-path /path/to/database \
+        --rank no_rank \
+        --group-rank no_rank \
+        --tree-label-rank no_rank
+
+
+2.4 Expanded rank choices
+-------------------------
+
+The command-line interface now accepts:
+
+    phylum
+    class
+    order
+    family
+    genus
+    species
+    no_rank
+
+The underlying taxonomy module also recognises domain, although domain is not
+currently exposed in the main CLI rank choices.
+
+
+2.5 Separate classification and placement thresholds
+-----------------------------------------------------
+
+Strict similarity thresholds are used for direct classification:
+
+    --min-identity
+    --min-coverage
+
+Current defaults:
+
+    --min-identity 90
+    --min-coverage 80
+
+Moderate raw hits can still be retained as phylogenetic placement anchors using:
+
+    --placement-min-identity
+    --placement-min-coverage
+
+Current defaults:
+
+    --placement-min-identity 70
+    --placement-min-coverage 50
+
+Weak hits can be retained for broad rescue placement using:
+
+    --rescue-min-identity
+    --rescue-min-coverage
+
+Current defaults:
+
+    --rescue-min-identity 50
+    --rescue-min-coverage 40
+
+The number of retained placement hits can be limited using:
+
+    --max-placement-hits-per-query
+
+The number of retained rescue hits can be limited using:
+
+    --max-rescue-hits-per-query
+
+Current rescue default:
+
+    --max-rescue-hits-per-query 25
+
+The placement hit limit defaults to all hits passing the placement thresholds.
+
+This design prevents weak hits from being treated as confident classifications
+while still allowing them to contribute phylogenetic context.
+
+
+2.6 Query-level placement planning
+----------------------------------
+
+ePLACE now builds a placement plan for each query.
+
+The plan separates queries according to the evidence available from:
+
+- Strict retained hits.
+- Moderate placement hits.
+- Weak rescue hits.
+- Queries with insufficient placement evidence.
+
+The placement route is logged during execution and is used to determine which
+reference sequences are carried forward into tree construction.
+
+
+2.7 Improved classification output
+----------------------------------
+
+The detailed classification output has been expanded substantially.
+
+It can contain evidence from:
+
+- BLAST or MMseqs2 matches.
+- Best and second-best similarity scores.
+- Identity gaps.
+- Numbers of competing hits and competing taxa.
+- Taxonomy derived from sequence searching.
+- Taxonomy inferred from tree placement.
+- Agreement between search and tree evidence.
+- Nearest-neighbour and sister-clade context.
+- Lowest taxonomic rank consistently supported by the tree.
+- Final decision rank, taxid, and name.
+- Decision confidence.
+- Decision reason.
+
+The detailed table is intended as an evidence-rich secondary output that allows
+users to inspect individual assignments.
+
+A simplified summary output should remain the preferred table for routine
+downstream ecological analysis. The expected core fields are:
+
+    query_id
+    decision_rank
+    decision_taxid
+    decision_name
+    decision_confidence
+    decision_reason
+
+REVIEW NOTE:
+Confirm the current exact filename of the simplified summary output before this
+text is moved into the public README.
+
+
+2.8 Search and tree evidence are retained separately
+----------------------------------------------------
+
+The output distinguishes among:
+
+- Taxonomy derived from sequence searching.
+- Taxonomy supported by tree position.
+- Final classification decision.
+- Whether the tree agrees with the final decision.
+
+This separation is important because a high-scoring similarity match and a
+phylogenetically supported assignment are related but not identical forms of
+evidence.
+
+
+2.9 Grouped phylogenetic analysis
+---------------------------------
+
+The grouped workflow places related queries into shared phylogenetic contexts.
+
+Queries are grouped using:
+
+    --group-rank
+
+Reference representatives are selected using:
+
+    --rank
+
+Tree labels are controlled using:
+
+    --tree-label-rank
+
+A combined tree across all groups is optional and is only built when:
+
+    --combined-tree-label-rank
+
+is provided.
+
+This avoids accidentally building a very large and expensive combined tree.
+
+
+2.10 Individual phylogenetic analysis
+-------------------------------------
+
+The search workflow creates one phylogenetic analysis per query sequence.
+
+This mode is useful when:
+
+- Queries are taxonomically unrelated.
+- Each assignment needs an independent tree.
+- Per-query tree inspection is preferred over grouped interpretation.
+
+
+2.11 MMseqs2 database download and taxonomy integration
+-------------------------------------------------------
+
+The download command can now target:
+
+    blast
+    mmseqs2
+    both
+
+MMseqs2 database download:
+
+    eplace download \
+        --target mmseqs2 \
+        --mmseqs-db-dir /path/to/mmseqs_db
+
+MMseqs2 taxonomy sidecar creation:
+
+    eplace download \
+        --target mmseqs2 \
+        --mmseqs-db-dir /path/to/mmseqs_db \
+        --add-taxonomy \
+        --ncbi-taxonomy /path/to/ncbi/taxonomy/current
+
+Optional supporting paths:
+
+    --acc2taxid-dir
+    --taxonomy-workdir
+
+Memory checks can be overridden using:
+
+    --skip-memory-check
+
+Current preflight expectations:
+
+- MMseqs2 NT download: approximately 64 GiB RAM minimum.
+- MMseqs2 taxonomy integration: approximately 128 GiB RAM minimum.
+
+
+2.12 Logging controls
+---------------------
+
+Logging verbosity can be controlled globally or within subcommands using:
+
+    --log-level
+
+Available levels:
+
+    DEBUG
+    INFO
+    WARNING
+    ERROR
+    CRITICAL
+
+Default:
+
+    INFO
+
+
+2.13 Experimental amplicon preprocessing
+----------------------------------------
+
+The branch contains two distinct preprocessing concepts.
+
+A. Registered Python command:
+
+    eplace-preprocess
+
+The current Python implementation expects:
+
+    paired R1
+    paired R2
+    separate I1 index FASTQ
+    separate I2 index FASTQ
+    sample sheet
+
+It performs:
+
+    I1/I2 demultiplexing
+    primer trimming with Cutadapt
+    paired-end DADA2
+    ASV export
+
+B. Editable shell workflows under scripts/
+
+These were developed for transparent, line-by-line troubleshooting and may
+support different facility outputs, including inline-barcode amplicons.
+
+IMPORTANT REVIEW NOTE:
+The registered Python command and the newer shell-based preprocessing direction
+do not currently describe the same input model. Preprocessing should remain
+labelled experimental until one route is selected, tested, and documented.
+
+
+============================================================
+3. INSTALLATION
+============================================================
+
+Create an environment:
+
+    mamba create -n eplace \
+        python=3.11 \
+        bioconda::blast \
+        bioconda::mmseqs2 \
+        bioconda::pytaxonkit \
+        bioconda::iqtree \
+        bioconda::mafft
+
+Activate it:
+
+    mamba activate eplace
+
+Clone the repository and switch to the development branch:
+
+    git clone https://github.com/mpdoane2/eplace.git
+    cd eplace
+    git checkout nbdl-taxonomy-mode
+
+Install the branch in editable mode:
+
+    pip install -e .
+
+Check the installation:
+
+    eplace --version
+    eplace --help
+
+
+============================================================
+4. CURRENT COMMAND STRUCTURE
+============================================================
+
+The primary ePLACE command exposes:
+
+    eplace download
+    eplace search
+    eplace grouped
+    eplace relabel
+
+A separate experimental preprocessing executable is registered as:
+
+    eplace-preprocess
+
+
+============================================================
+5. DATABASE DOWNLOAD
+============================================================
+
+Download BLAST core_nt:
+
+    eplace download
+
+Download MMseqs2 NT:
+
+    eplace download \
+        --target mmseqs2 \
+        --mmseqs-db-dir /path/to/mmseqs_db \
+        --mmseqs-threads 16
+
+Download both:
+
+    eplace download \
+        --target both \
+        --mmseqs-db-dir /path/to/mmseqs_db
+
+Add taxonomy to MMseqs2:
+
+    eplace download \
+        --target mmseqs2 \
+        --mmseqs-db-dir /path/to/mmseqs_db \
+        --add-taxonomy \
+        --ncbi-taxonomy /path/to/ncbi/taxonomy/current \
+        --acc2taxid-dir /path/to/accession2taxid \
+        --taxonomy-workdir /path/to/taxonomy_work
+
+
+============================================================
+6. INDIVIDUAL SEARCH WORKFLOW
+============================================================
+
+Basic BLAST workflow:
+
+    eplace search query.fasta output_dir
+
+BLAST with explicit thresholds:
+
+    eplace search query.fasta output_dir \
+        --search-tool blast \
+        --database core_nt \
+        --blastdb-path /path/to/blastdb \
+        --blast-db-source ncbi_core_nt \
+        --rank genus \
+        --tree-label-rank genus \
+        --min-identity 90 \
+        --min-coverage 80 \
+        --placement-min-identity 70 \
+        --placement-min-coverage 50 \
+        --rescue-min-identity 50 \
+        --rescue-min-coverage 40 \
+        --max-rescue-hits-per-query 25 \
+        --num-threads 16
+
+MMseqs2 workflow:
+
+    eplace search query.fasta output_dir \
+        --search-tool mmseqs2 \
+        --mmseqs-database core_nt \
+        --mmseqs-db-path /path/to/mmseqs_db \
+        --mmseqs-db-source ncbi_core_nt_derived_mmseqs2 \
+        --mmseqs-sensitivity 5.7 \
+        --mmseqs-search-type 3 \
+        --mmseqs-memory-limit 400G \
+        --timeout 3600 \
+        --rank genus \
+        --tree-label-rank genus \
+        --min-identity 90 \
+        --min-coverage 80 \
+        --placement-min-identity 70 \
+        --placement-min-coverage 50 \
+        --rescue-min-identity 50 \
+        --rescue-min-coverage 40 \
+        --num-threads 16
+
+Skip alignment and tree construction:
+
+    eplace search query.fasta output_dir --skip-alignment
+
+Use a custom classification filename:
+
+    eplace search query.fasta output_dir \
+        --output-classification classifications.tsv
+
+Custom database without NCBI taxonomy:
+
+    eplace search query.fasta output_dir \
+        --search-tool blast \
+        --database custom_database \
+        --blastdb-path /path/to/custom_blastdb \
+        --blast-db-source local_custom_reference \
+        --rank no_rank \
+        --tree-label-rank no_rank \
+        --num-threads 16
+
+
+============================================================
+7. GROUPED WORKFLOW
+============================================================
+
+Basic grouped workflow:
+
+    eplace grouped query.fasta output_dir
+
+Group by family and select genus representatives:
+
+    eplace grouped query.fasta output_dir \
+        --rank genus \
+        --group-rank family \
+        --tree-label-rank genus \
+        --num-threads 16
+
+Grouped MMseqs2 workflow:
+
+    eplace grouped query.fasta output_dir \
+        --search-tool mmseqs2 \
+        --mmseqs-database core_nt \
+        --mmseqs-db-path /path/to/mmseqs_db \
+        --mmseqs-db-source ncbi_core_nt_derived_mmseqs2 \
+        --mmseqs-sensitivity 5.7 \
+        --mmseqs-search-type 3 \
+        --mmseqs-memory-limit 400G \
+        --rank genus \
+        --group-rank family \
+        --tree-label-rank genus \
+        --num-threads 16
+
+Build an optional combined tree:
+
+    eplace grouped query.fasta output_dir \
+        --rank genus \
+        --group-rank family \
+        --tree-label-rank genus \
+        --combined-tree-label-rank genus \
+        --num-threads 16
+
+Grouped custom-database mode:
+
+    eplace grouped query.fasta output_dir \
+        --search-tool blast \
+        --database custom_database \
+        --blastdb-path /path/to/custom_blastdb \
+        --blast-db-source local_custom_reference \
+        --rank no_rank \
+        --group-rank no_rank \
+        --tree-label-rank no_rank \
+        --num-threads 16
+
+
+============================================================
+8. TREE RELABELING
+============================================================
+
+Relabel a BLAST-derived tree:
+
+    eplace relabel \
+        blast_results.txt \
+        input.treefile \
+        output_labeled.treefile \
+        --rank genus
+
+Relabel an MMseqs2-derived tree:
+
+    eplace relabel \
+        mmseqs_results.txt \
+        input.treefile \
+        output_labeled.treefile \
+        --rank genus
+
+
+============================================================
+9. EXPERIMENTAL PREPROCESSING
+============================================================
+
+The currently registered eplace-preprocess command requires paired biological
+reads and separate index-read FASTQs:
+
+    eplace-preprocess \
+        --reads-r1 run_R1.fastq.gz \
+        --reads-r2 run_R2.fastq.gz \
+        --index-i1 run_I1.fastq.gz \
+        --index-i2 run_I2.fastq.gz \
+        --sample-sheet samples.tsv \
+        --forward-primer AGAGTTTGATCMTGGCTCAG \
+        --reverse-primer GWATTACCGCGGCKGCTG \
+        --output-dir preprocessing_output \
+        --threads 16 \
+        --index-mismatches 0 \
+        --primer-error-rate 0.15 \
+        --minimum-length 50 \
+        --trunc-len-f 255 \
+        --trunc-len-r 250 \
+        --max-ee-f 2 \
+        --max-ee-r 6 \
+        --trunc-q 6 \
+        --min-overlap 10 \
+        --max-mismatch 1 \
+        --pool pseudo
+
+Required sample-sheet columns:
+
+    sample_id
+    index1
+    index2
+
+The scripts directory also contains editable shell workflows for line-by-line
+preprocessing. These should be reviewed separately because they target
+facility-specific input layouts and do not currently match the registered
+Python command.
+
+
+============================================================
+10. IMPORTANT OUTPUTS
+============================================================
+
+Search provenance:
+
+    search_metadata.json
+
+Detailed classification evidence:
+
+    Controlled using --output-classification PATH
+
+Expected primary summary fields:
+
+    query_id
+    decision_rank
+    decision_taxid
+    decision_name
+    decision_confidence
+    decision_reason
+
+Detailed evidence fields may include:
+
+    query_id
+    blast_hits
+    taxonomy_blast
+    blast_classification_rank
+    blast_classification_taxid
+    blast_classification_name
+    blast_group_rank
+    blast_group_taxid
+    blast_group_name
+    blast_tree_label_rank
+    blast_tree_label_taxid
+    blast_tree_label_name
+    tree_based_classification
+    taxonomy_tree
+    tree_classification_rank
+    tree_classification_taxid
+    tree_classification_name
+    tree_group_rank
+    tree_group_taxid
+    tree_group_name
+    tree_tree_label_rank
+    tree_tree_label_taxid
+    tree_tree_label_name
+    appears_in_multiple_groups
+    best_percent_identity
+    best_query_coverage
+    best_bit_score
+    second_percent_identity
+    identity_gap
+    competing_hit_count
+    competing_species_count
+    competing_genus_count
+    competing_family_count
+    decision_rank
+    decision_taxid
+    decision_name
+    tree_agrees_with_decision
+    decision_confidence
+    decision_reason
+    tree_nearest_neighbor_label
+    tree_sister_reference_count
+    tree_sister_taxa
+    tree_lowest_consistent_rank
+    tree_lowest_consistent_taxid
+    tree_lowest_consistent_name
+
+REVIEW NOTE:
+The exact output filenames and final column set should be generated from a
+current successful run before publishing this material.
+
+
+============================================================
+11. DOCUMENTATION GAPS IDENTIFIED
+============================================================
+
+1. The README still presents ePLACE primarily as a BLAST workflow, although
+   MMseqs2 is now supported.
+
+2. Placement and rescue thresholds are not documented in the README.
+
+3. search_metadata.json and database provenance options are not documented.
+
+4. no_rank custom-database mode is not documented clearly.
+
+5. pyproject.toml still points repository URLs to linsalrob/eplace rather than
+   mpdoane2/eplace.
+
+6. The registered eplace-preprocess command and recent shell preprocessing
+   direction implement different input assumptions.
+
+7. preprocess_amplicons_with_demultiplex.sh should be checked for completeness
+   and execution validity before being advertised.
+
+8. The exact simplified classification filename should be confirmed.
+
+9. The exact detailed classification column list should be regenerated from a
+   current run.
+
+10. Package versioning should be reviewed before release.
+
+11. Installation guidance should confirm the tested Python version.
+
+12. Backend-specific sequence extraction behaviour should be documented for
+    custom BLAST and MMseqs2 databases.
+
+
+============================================================
+12. REVIEW CHECKLIST
+============================================================
+
+[ ] Run eplace --help and save the output.
+
+[ ] Run eplace search --help and compare every option with this document.
+
+[ ] Run eplace grouped --help and compare every option with this document.
+
+[ ] Run eplace download --help and compare every option with this document.
+
+[ ] Run eplace relabel --help and compare every option with this document.
+
+[ ] Run eplace-preprocess --help and decide whether the command remains supported.
+
+[ ] Complete one BLAST end-to-end test.
+
+[ ] Complete one MMseqs2 end-to-end test.
+
+[ ] Complete one custom-database no_rank test.
+
+[ ] Record all output filenames.
+
+[ ] Record the exact classification columns.
+
+[ ] Confirm whether the simplified summary is generated automatically.
+
+[ ] Validate shell scripts using bash -n.
+
+[ ] Resolve the public preprocessing workflow.
+
+[ ] Update package repository URLs.
+
+[ ] Update package version before release.
+
+[ ] Have an independent user follow the instructions from a clean environment.
+
+
+============================================================
+13. PROPOSED PUBLIC README STRUCTURE
+============================================================
+
+1. What ePLACE does.
+2. Installation.
+3. Supported search backends.
+4. Database setup.
+5. Quick-start examples.
+6. Individual workflow.
+7. Grouped workflow.
+8. Custom database and no_rank mode.
+9. Placement and rescue logic.
+10. Output files.
+11. Classification interpretation.
+12. Tree relabeling.
+13. Experimental preprocessing.
+14. Troubleshooting.
+15. Citation and licence.
+
+
+============================================================
+END OF REVIEW DRAFT
+============================================================

@@ -20,7 +20,14 @@ from .ncbi_download import (
     setup_mmseqs_taxonomy,
     check_available_memory_gb
 )
-from .blast_analysis import run_blast_search, run_mmseqs_search, validate_mmseqs_memory_limit, FastaReader
+from .blast_analysis import (
+    run_blast_search,
+    run_mmseqs_search,
+    validate_mmseqs_memory_limit,
+    FastaReader,
+    BlastRunner,
+    MMseqs2Runner,
+)
 from .taxonomy import (
     process_blast_results_for_taxonomy,
     rewrite_blast_hits,
@@ -36,7 +43,16 @@ from .alignment import (
     concatenate_all_groups_and_build_tree
 )
 
+from .placement import (
+    PlacementThresholds,
+    build_query_placement_plan,
+    collect_tree_candidate_hits,
+    group_tree_hits_by_query,
+    placement_plan_summary_counts,
+)
+
 # Configure logging (level is overridden at runtime via --log-level)
+RANK_CHOICES = ['phylum', 'class', 'order', 'family', 'genus', 'species', 'no_rank']
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
@@ -238,6 +254,54 @@ def _write_backend_search_metadata(args, mmseqs_database: str) -> None:
             database_source=args.blast_db_source or args.database
         )
 
+def _parse_raw_search_hits(args, search_output: Path) -> list:
+    """
+    Parse raw BLAST/MMseqs hits before identity/coverage filtering.
+    """
+    try:
+        if args.search_tool == "mmseqs2":
+            runner = MMseqs2Runner(args.mmseqs_db_path)
+            raw_hits = runner.parse_mmseqs_results(search_output)
+        else:
+            runner = BlastRunner(blastdb_path=args.blastdb_path)
+            raw_hits = runner.parse_blast_results(search_output)
+
+        logger.info(f"Parsed {len(raw_hits)} raw search hits for classification context")
+        return raw_hits
+
+    except Exception as e:
+        logger.warning(f"Could not parse raw search hits for classification context: {e}")
+        return []
+
+def _build_placement_plan_from_args(args, sequences, filtered_hits, raw_blast_hits):
+    """
+    Build query-level placement routes from strict retained hits and raw search hits.
+    """
+    thresholds = PlacementThresholds(
+        classification_min_identity=args.min_identity,
+        classification_min_coverage=args.min_coverage,
+        placement_min_identity=args.placement_min_identity,
+        placement_min_coverage=args.placement_min_coverage,
+        rescue_min_identity=args.rescue_min_identity,
+        rescue_min_coverage=args.rescue_min_coverage,
+    )
+
+    placement_plan = build_query_placement_plan(
+        sequences=sequences,
+        retained_hits=filtered_hits,
+        raw_hits=raw_blast_hits,
+        thresholds=thresholds,
+        max_placement_hits_per_query=args.max_placement_hits_per_query,
+        max_rescue_hits_per_query=args.max_rescue_hits_per_query,
+        backbone_available=False,
+    )
+
+    route_counts = placement_plan_summary_counts(placement_plan)
+    logger.info("Placement route summary:")
+    for route, count in sorted(route_counts.items()):
+        logger.info(f"  {route}: {count}")
+
+    return placement_plan
 
 def download_command(args):
     """Handle the download subcommand."""
@@ -326,15 +390,32 @@ def blast_command(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
     
     # Set default output classification file if not provided
+    base_name = args.query_fasta.stem
+
+    for ext in [".fasta", ".fa", ".fna", ".ffn", ".faa", ".frn"]:
+        if base_name.endswith(ext):
+            base_name = base_name[:-len(ext)]
+            break
+
     if args.output_classification is None:
-        base_name = args.query_fasta.stem
-        for ext in ['.fasta', '.fa', '.fna', '.ffn', '.faa', '.frn']:
-            if base_name.endswith(ext):
-                base_name = base_name[:-len(ext)]
-                break
-        args.output_classification = args.output_dir / f"{base_name}_classification.tsv"
+        args.output_classification = (
+            args.output_dir / f"{base_name}_classification.tsv"
+        )
+
     if not args.output_classification.is_absolute():
-        args.output_classification = args.output_dir / args.output_classification
+        args.output_classification = (
+            args.output_dir / args.output_classification
+        )
+
+    if args.output_taxonomy is None:
+        args.output_taxonomy = (
+            args.output_dir / f"{base_name}_taxonomy.tsv"
+        )
+
+    if not args.output_taxonomy.is_absolute():
+        args.output_taxonomy = (
+            args.output_dir / args.output_taxonomy
+        )
     
     skip_existing = not args.overwrite_existing_blast
 
@@ -446,7 +527,18 @@ def blast_command(args):
     # CLI args.
     if search_ran:
         _write_backend_search_metadata(args, mmseqs_database)
+    
+    raw_blast_hits = _parse_raw_search_hits(args, search_output)
+    
+    placement_plan = _build_placement_plan_from_args(
+        args=args,
+        sequences=sequences,
+        filtered_hits=filtered_hits,
+        raw_blast_hits=raw_blast_hits,
+    )
 
+    tree_candidate_hits = collect_tree_candidate_hits(placement_plan)
+    
     # Step 3: Group hits by query and display summary
     logger.info("\n[Step 3/5] Analyzing search results...")
     hits_by_query = defaultdict(int)
@@ -461,7 +553,7 @@ def blast_command(args):
     
     try:
         results = process_blast_results_for_taxonomy(
-            blast_hits=filtered_hits,
+            blast_hits=tree_candidate_hits,
             output_dir=args.output_dir,
             rank=args.rank,
             database=args.database,
@@ -494,10 +586,8 @@ def blast_command(args):
     if not args.skip_alignment:
         logger.info("\n[Step 5/5] Aligning sequences and building phylogenetic trees...")
         
-        # Group hits by query for processing
-        hits_by_query_map = defaultdict(list)
-        for hit in filtered_hits:
-            hits_by_query_map[hit.query_id].append(hit)
+        # Group placement-eligible hits by query for processing
+        hits_by_query_map = group_tree_hits_by_query(placement_plan)
         
         # Process all queries to do trimming and alignment
         # and start tree building in background
@@ -598,15 +688,26 @@ def blast_command(args):
                 tree_files_map[query_id] = tree_file
     
     try:
+        
+        logger.debug("DEBUG classification output: %s", args.output_classification)
+        logger.debug("DEBUG number sequences: %d", len(sequences))
+        logger.debug("DEBUG number filtered_hits: %d", len(filtered_hits))
+        logger.debug("DEBUG tree_files_map: %s", tree_files_map)
+        
         success = generate_classification_summary(
             sequences=sequences,
             blast_hits=filtered_hits,
             output_file=args.output_classification,
+            assignment_output_file=args.output_taxonomy,
             rank=args.rank,
-            group_rank=args.rank,  # For individual workflow, group_rank same as rank
+            group_rank=args.rank,
             tree_label_rank=args.tree_label_rank,
-            tree_files=tree_files_map if tree_files_map else None
+            tree_files=tree_files_map if tree_files_map else None,
+            raw_blast_hits=raw_blast_hits,
+            placement_plan=placement_plan,
         )
+        
+        logger.debug("DEBUG classification success: %s", success)
         
         if success:
             logger.info(f"✓ Classification summary: {args.output_classification}")
@@ -767,17 +868,32 @@ def grouped_command(args):
     # Create output directory
     args.output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Set default output classification file if not provided
+    # Derive the base output name from the input FASTA filename.
+    base_name = args.query_fasta.stem
+
+    for ext in [".fasta", ".fa", ".fna", ".ffn", ".faa", ".frn"]:
+        if base_name.endswith(ext):
+            base_name = base_name[:-len(ext)]
+            break
+
     if args.output_classification is None:
-        base_name = args.query_fasta.stem
-        for ext in ['.fasta', '.fa', '.fna', '.ffn', '.faa', '.frn']:
-            if base_name.endswith(ext):
-                base_name = base_name[:-len(ext)]
-                break
-        args.output_classification = args.output_dir / f"{base_name}_classification.tsv"
-    if not args.output_classification.is_absolute():
-        args.output_classification = args.output_dir / args.output_classification
-    
+        args.output_classification = (
+            args.output_dir / f"{base_name}_classification.tsv"
+        )
+    elif not args.output_classification.is_absolute():
+        args.output_classification = (
+            args.output_dir / args.output_classification
+        )
+
+    if args.output_taxonomy is None:
+        args.output_taxonomy = (
+            args.output_dir / f"{base_name}_taxonomy.tsv"
+        )
+    elif not args.output_taxonomy.is_absolute():
+        args.output_taxonomy = (
+            args.output_dir / args.output_taxonomy
+        )
+
     skip_existing = not args.overwrite_existing_blast
 
     # Determine effective MMseqs2 database name early so it can be logged
@@ -792,7 +908,8 @@ def grouped_command(args):
     logger.info(f"Representative rank: {args.rank}")
     logger.info(f"Grouping rank: {args.group_rank}")
     logger.info(f"Tree labeling rank: {args.tree_label_rank}")
-    logger.info(f"Classification output file: {args.output_classification}")
+    logger.info(f"Analysis-ready taxonomy output file: {args.output_taxonomy}")
+    logger.info(f"Detailed classification output file: {args.output_classification}")
     logger.info(f"Min identity: {args.min_identity}%")
     logger.info(f"Min coverage: {args.min_coverage}%")
     logger.info(f"Threads: {args.num_threads}")
@@ -889,13 +1006,24 @@ def grouped_command(args):
     # CLI args.
     if search_ran:
         _write_backend_search_metadata(args, mmseqs_database)
+    
+    raw_blast_hits = _parse_raw_search_hits(args, search_output)
+    
+    placement_plan = _build_placement_plan_from_args(
+        args=args,
+        sequences=sequences,
+        filtered_hits=filtered_hits,
+        raw_blast_hits=raw_blast_hits,
+    )
 
+    tree_candidate_hits = collect_tree_candidate_hits(placement_plan)
+    
     # Step 3: Process taxonomy information
     logger.info(f"\n[Step 3/9] Processing taxonomy information (rank: {args.rank})...")
     
     try:
         results = process_blast_results_for_taxonomy(
-            blast_hits=filtered_hits,
+            blast_hits=tree_candidate_hits,
             output_dir=args.output_dir,
             rank=args.rank,
             database=args.database,
@@ -927,7 +1055,7 @@ def grouped_command(args):
     # Step 4: Check alignment consistency
     logger.info("\n[Step 4/9] Checking alignment consistency...")
     consistency = check_alignment_consistency(
-        blast_hits=filtered_hits,
+        blast_hits=tree_candidate_hits,
         tolerance=args.alignment_tolerance
     )
     
@@ -942,7 +1070,60 @@ def grouped_command(args):
 
     # Step 5: Group hits by group_rank
     logger.info(f"\n[Step 5/9] Grouping hits by {args.group_rank}...")
-    grouped_hits = group_hits_by_group_rank(filtered_hits, args.group_rank)
+    
+    # Defensive taxonomy attachment before grouped workflow.
+    # This is needed when taxids were recovered from custom BLAST output/header fields
+    # but subject_taxonomy was not attached to the BlastHit objects used for grouping.
+    from .taxonomy import TaxonomyExtractor
+
+    missing_taxonomy = [
+        h for h in filtered_hits
+        if not isinstance(h.subject_taxonomy, dict)
+    ]
+
+    if missing_taxonomy:
+        logger.warning(
+            "Detected %d/%d filtered hits without attached subject_taxonomy before grouping. "
+            "Attempting to attach taxonomy from subject_taxid.",
+            len(missing_taxonomy),
+            len(filtered_hits),
+        )
+
+        missing_values = {"", "0", "N/A", "NA", "-"}
+        taxids = sorted({
+            h.subject_taxid
+            for h in filtered_hits
+            if h.subject_taxid not in missing_values
+        })
+
+        logger.info("Recovering taxonomy for %d unique valid taxids before grouping", len(taxids))
+
+        tax_dict = TaxonomyExtractor().parse_taxids(taxids)
+
+        attached = 0
+        with_group_rank = 0
+
+        for h in filtered_hits:
+            if h.subject_taxid in tax_dict:
+                h.subject_taxonomy = tax_dict[h.subject_taxid]
+                attached += 1
+                if args.group_rank in h.subject_taxonomy:
+                    with_group_rank += 1
+
+        logger.info("Attached taxonomy to %d filtered hits", attached)
+        logger.info("Hits with group rank '%s': %d", args.group_rank, with_group_rank)
+
+        for h in filtered_hits[:20]:
+            logger.debug(
+                "Grouping debug: query=%s subject=%s taxid=%r taxonomy=%r group_value=%r",
+                h.query_id,
+                h.subject_id,
+                h.subject_taxid,
+                h.subject_taxonomy,
+                h.subject_taxonomy.get(args.group_rank) if isinstance(h.subject_taxonomy, dict) else None,
+            )
+    
+    grouped_hits = group_hits_by_group_rank(tree_candidate_hits, args.group_rank)
     
     if not grouped_hits:
         logger.error("No groups found after grouping by rank")
@@ -1102,14 +1283,23 @@ def grouped_command(args):
             sequences=sequences,
             blast_hits=filtered_hits,
             output_file=args.output_classification,
+            assignment_output_file=args.output_taxonomy,
             rank=args.rank,
             group_rank=args.group_rank,
             tree_label_rank=args.tree_label_rank,
-            tree_files=tree_files_map if tree_files_map else None
+            tree_files=tree_files_map if tree_files_map else None,
+            raw_blast_hits=raw_blast_hits,
+            placement_plan=placement_plan,
         )
         
         if success:
-            logger.info(f"✓ Classification summary: {args.output_classification}")
+            logger.info(
+                f"✓ Analysis-ready taxonomy: {args.output_taxonomy}"
+            )
+            logger.info(
+                f"✓ Detailed classification evidence: "
+                f"{args.output_classification}"
+            )
         else:
             logger.warning("Failed to generate classification summary")
     except Exception as e:
@@ -1123,7 +1313,7 @@ def grouped_command(args):
                 output_dir=args.output_dir,
                 query_fasta=args.query_fasta,
                 classification_file=args.output_classification,
-                blast_hits=filtered_hits,
+                blast_hits=tree_candidate_hits,
                 combined_tree_label_rank=args.combined_tree_label_rank,
                 num_threads=args.num_threads
             )
@@ -1165,6 +1355,67 @@ def _add_log_level_argument(p, *, is_top_level=False):
         help='Set logging verbosity level (default: INFO)'
     )
 
+def _add_placement_arguments(p):
+    """
+    Add placement/rescue threshold arguments.
+
+    These thresholds control phylogenetic placement eligibility, not strict
+    BLAST classification confidence.
+    """
+    p.add_argument(
+        '--placement-min-identity',
+        type=float,
+        default=70.0,
+        help=(
+            'Minimum percent identity for moderate raw hits to be used as '
+            'phylogenetic placement anchors (default: 70.0).'
+        )
+    )
+    p.add_argument(
+        '--placement-min-coverage',
+        type=float,
+        default=50.0,
+        help=(
+            'Minimum query coverage for moderate raw hits to be used as '
+            'phylogenetic placement anchors (default: 50.0).'
+        )
+    )
+    p.add_argument(
+        '--rescue-min-identity',
+        type=float,
+        default=50.0,
+        help=(
+            'Minimum percent identity for weak raw hits to be used for broad '
+            'rescue placement only (default: 50.0).'
+        )
+    )
+    p.add_argument(
+        '--rescue-min-coverage',
+        type=float,
+        default=40.0,
+        help=(
+            'Minimum query coverage for weak raw hits to be used for broad '
+            'rescue placement only (default: 40.0).'
+        )
+    )
+    p.add_argument(
+        '--max-placement-hits-per-query',
+        type=int,
+        default=None,
+        help=(
+            'Maximum number of moderate placement hits to keep per query. '
+            'Default keeps all hits passing placement thresholds.'
+        )
+    )
+    p.add_argument(
+        '--max-rescue-hits-per-query',
+        type=int,
+        default=25,
+        help=(
+            'Maximum number of weak rescue hits to keep per query '
+            '(default: 25).'
+        )
+    )
 
 def main():
     """Main entry point for the ePLACE CLI."""
@@ -1333,14 +1584,14 @@ Notes:
         '--rank',
         type=str,
         default='genus',
-        choices=['phylum', 'class', 'order', 'family', 'genus', 'species'],
+        choices=RANK_CHOICES,
         help='Taxonomic rank for representative selection (default: genus)'
     )
     search_parser.add_argument(
         '--tree-label-rank',
         type=str,
         default='genus',
-        choices=['phylum', 'class', 'order', 'family', 'genus', 'species'],
+        choices=RANK_CHOICES,
         help='Taxonomic rank for tree labeling (default: genus)'
     )
     search_parser.add_argument(
@@ -1355,6 +1606,8 @@ Notes:
         default=80.0,
         help='Minimum query coverage percentage (default: 80.0)'
     )
+    _add_placement_arguments(search_parser)
+    
     search_parser.add_argument(
         '--database',
         type=str,
@@ -1518,28 +1771,28 @@ Notes:
         '--rank',
         type=str,
         default='genus',
-        choices=['phylum', 'class', 'order', 'family', 'genus', 'species'],
+        choices=RANK_CHOICES,
         help='Taxonomic rank for representative selection (default: genus)'
     )
     grouped_parser.add_argument(
         '--group-rank',
         type=str,
         default='class',
-        choices=['phylum', 'class', 'order', 'family', 'genus', 'species'],
+        choices=RANK_CHOICES,
         help='Taxonomic rank for grouping sequences (default: class)'
     )
     grouped_parser.add_argument(
         '--tree-label-rank',
         type=str,
         default='genus',
-        choices=['phylum', 'class', 'order', 'family', 'genus', 'species'],
+        choices=RANK_CHOICES,
         help='Taxonomic rank for tree labeling (default: genus)'
     )
     grouped_parser.add_argument(
         '--combined-tree-label-rank',
         type=str,
         default=None,
-        choices=['phylum', 'class', 'order', 'family', 'genus', 'species'],
+        choices=RANK_CHOICES,
         help='Taxonomic rank for tree labeling for the combined tree. If not provided, the combined tree will not be built (to save time with large datasets).'
     )
     grouped_parser.add_argument(
@@ -1554,6 +1807,8 @@ Notes:
         default=80.0,
         help='Minimum query coverage percentage (default: 80.0)'
     )
+    _add_placement_arguments(grouped_parser)
+    
     grouped_parser.add_argument(
         '--database',
         type=str,
@@ -1674,10 +1929,25 @@ Notes:
         help='Maximum coordinate difference for alignment consistency (default: 50)'
     )
     grouped_parser.add_argument(
-        '--output-classification',
+        "--output-classification",
         type=Path,
         default=None,
-        help='Path to output classification TSV file'
+        help=(
+            "Path to the detailed classification evidence TSV. "
+            "Defaults to <output-dir>/<query-name>_classification.tsv."
+        ),
+    )
+    grouped_parser.add_argument(
+        "--output-taxonomy",
+        type=Path,
+        default=None,
+        help=(
+            "Path for the compact analysis-ready taxonomy TSV. "
+            "Defaults to <output-dir>/<query-name>_taxonomy.tsv. "
+            "Only High- and Moderate-confidence classifications are "
+            "reported as formal assignments; Low-confidence results "
+            "remain Unclassified."
+        ),
     )
     _add_log_level_argument(grouped_parser)
     
