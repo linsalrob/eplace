@@ -923,7 +923,7 @@ def _lineage_for_hit(hit: Optional[BlastHit]):
     Return the standard semicolon-delimited lineage string for a BLAST hit.
     """
     if not hit or not hit.subject_taxonomy:
-        return ";;;;;"
+        return ";;;;;;"
 
     return ";".join([
         hit.subject_taxonomy[r][1] if r in hit.subject_taxonomy else ""
@@ -970,7 +970,7 @@ def make_raw_blast_evidence(
         "raw_best_query_coverage": "N/A",
         "raw_best_bit_score": "N/A",
         "raw_best_subject_id": "N/A",
-        "raw_best_taxonomy": ";;;;;",
+        "raw_best_taxonomy": ";;;;;;",
         "raw_evidence_status": "no_detectable_match",
     }
 

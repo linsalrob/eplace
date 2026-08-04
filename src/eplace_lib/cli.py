@@ -390,33 +390,32 @@ def blast_command(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
     
     # Set default output classification file if not provided
+    base_name = args.query_fasta.stem
+
+    for ext in [".fasta", ".fa", ".fna", ".ffn", ".faa", ".frn"]:
+        if base_name.endswith(ext):
+            base_name = base_name[:-len(ext)]
+            break
+
     if args.output_classification is None:
-        base_name = args.query_fasta.stem
+        args.output_classification = (
+            args.output_dir / f"{base_name}_classification.tsv"
+        )
 
-        for ext in [".fasta", ".fa", ".fna", ".ffn", ".faa", ".frn"]:
-            if base_name.endswith(ext):
-                base_name = base_name[:-len(ext)]
-                break
+    if not args.output_classification.is_absolute():
+        args.output_classification = (
+            args.output_dir / args.output_classification
+        )
 
-        if args.output_classification is None:
-            args.output_classification = (
-                args.output_dir / f"{base_name}_classification.tsv"
-            )
+    if args.output_taxonomy is None:
+        args.output_taxonomy = (
+            args.output_dir / f"{base_name}_taxonomy.tsv"
+        )
 
-        if not args.output_classification.is_absolute():
-            args.output_classification = (
-                args.output_dir / args.output_classification
-            )
-
-        if args.output_taxonomy is None:
-            args.output_taxonomy = (
-                args.output_dir / f"{base_name}_taxonomy.tsv"
-            )
-
-        if not args.output_taxonomy.is_absolute():
-            args.output_taxonomy = (
-                args.output_dir / args.output_taxonomy
-            )
+    if not args.output_taxonomy.is_absolute():
+        args.output_taxonomy = (
+            args.output_dir / args.output_taxonomy
+        )
     
     skip_existing = not args.overwrite_existing_blast
 
@@ -690,10 +689,10 @@ def blast_command(args):
     
     try:
         
-        print("DEBUG classification output:", args.output_classification)
-        print("DEBUG number sequences:", len(sequences))
-        print("DEBUG number filtered_hits:", len(filtered_hits))
-        print("DEBUG tree_files_map:", tree_files_map)
+        logger.debug("DEBUG classification output: %s", args.output_classification)
+        logger.debug("DEBUG number sequences: %d", len(sequences))
+        logger.debug("DEBUG number filtered_hits: %d", len(filtered_hits))
+        logger.debug("DEBUG tree_files_map: %s", tree_files_map)
         
         success = generate_classification_summary(
             sequences=sequences,
@@ -701,14 +700,14 @@ def blast_command(args):
             output_file=args.output_classification,
             assignment_output_file=args.output_taxonomy,
             rank=args.rank,
-            group_rank=args.group_rank,
+            group_rank=args.rank,
             tree_label_rank=args.tree_label_rank,
             tree_files=tree_files_map if tree_files_map else None,
             raw_blast_hits=raw_blast_hits,
             placement_plan=placement_plan,
         )
         
-        print("DEBUG classification success:", success)
+        logger.debug("DEBUG classification success: %s", success)
         
         if success:
             logger.info(f"✓ Classification summary: {args.output_classification}")
@@ -1115,7 +1114,7 @@ def grouped_command(args):
         logger.info("Hits with group rank '%s': %d", args.group_rank, with_group_rank)
 
         for h in filtered_hits[:20]:
-            logger.info(
+            logger.debug(
                 "Grouping debug: query=%s subject=%s taxid=%r taxonomy=%r group_value=%r",
                 h.query_id,
                 h.subject_id,

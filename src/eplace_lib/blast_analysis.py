@@ -458,8 +458,12 @@ class BlastRunner:
                     subject_end = int(fields[9])
                     evalue = float(fields[10])
                     bit_score = float(fields[11])
-                    staxid = fields[12]
-                    staxids = fields[13]
+                    if len(fields) < 14:
+                        staxid = ""
+                        staxids = ""
+                    else:
+                        staxid = fields[12]
+                        staxids = fields[13]
                     subject_title = fields[14] if len(fields) > 14 else ""
 
                     if is_missing_taxid(staxid) and subject_title:
@@ -473,9 +477,8 @@ class BlastRunner:
 
                             if not subject_id:
                                 subject_id = parsed_subject_id
-	
 
-		    # Calculate query coverage
+                    # Calculate query coverage
                     query_coverage = (abs(query_end - query_start) + 1) / query_length * 100
                     
                     hit = BlastHit(
