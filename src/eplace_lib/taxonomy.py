@@ -746,12 +746,17 @@ def _find_query_sister_tip_labels(tree_file: Path, query_id: str):
     tree_text = tree_file.read_text().strip()
 
     query_label = _safe_tree_label(query_id)
+    query_labels = {query_id, query_label, f"_R_{query_label}", f"{query_label}_R"}
 
-    if query_id not in tree_text and query_label not in tree_text:
+    # Match a complete tip label, so query1 does not match query10.
+    tip_pattern = re.compile(
+        r"(?<=[(,])\s*(" + "|".join(re.escape(label) for label in query_labels if label) + r")\s*(?=[:,);])"
+    )
+    match = tip_pattern.search(tree_text)
+    if match is None:
         return [], "Query not found", "Query was not found in the phylogenetic tree."
 
-    search_label = query_id if query_id in tree_text else query_label
-    query_pos = tree_text.find(search_label)
+    query_pos = match.start(1)
 
     # Walk left to find the nearest opening parenthesis that contains the query,
     # skipping over any sibling subtrees that have already closed.
@@ -787,10 +792,7 @@ def _find_query_sister_tip_labels(tree_file: Path, query_id: str):
     subtree = tree_text[left + 1:right]
     tips = _collect_tip_labels(subtree)
 
-    sister_tips = [
-        tip for tip in tips
-        if tip not in {query_id, query_label, f"_R_{query_label}", f"{query_label}_R"}
-    ]
+    sister_tips = [tip for tip in tips if tip not in query_labels]
 
     if not sister_tips:
         return [], "No reference sister clade", "No sister reference tips were found near the query."

@@ -5,9 +5,9 @@ DRAFT CHANGE MANIFEST AND UPDATED USAGE GUIDE
 STATUS
 ------
 Review draft only.
-This file has NOT been added to the GitHub repository.
-It is intended for internal review before the visible README or other public
-documentation is changed.
+This file is committed to the repository as a working draft, not as user
+documentation. It is intended for internal review before the visible README or
+other public documentation is changed.
 
 Repository reviewed:
 https://github.com/mpdoane2/eplace/tree/nbdl-taxonomy-mode

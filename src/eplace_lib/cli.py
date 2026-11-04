@@ -31,7 +31,8 @@ from .blast_analysis import (
 from .taxonomy import (
     process_blast_results_for_taxonomy,
     rewrite_blast_hits,
-    generate_classification_summary
+    generate_classification_summary,
+    _annotate_hits_with_taxonomy_if_needed,
 )
 from .alignment import (
     process_query_alignment_and_tree_parallel,
@@ -411,8 +412,7 @@ def blast_command(args):
         args.output_taxonomy = (
             args.output_dir / f"{base_name}_taxonomy.tsv"
         )
-
-    if not args.output_taxonomy.is_absolute():
+    elif not args.output_taxonomy.is_absolute():
         args.output_taxonomy = (
             args.output_dir / args.output_taxonomy
         )
@@ -570,6 +570,11 @@ def blast_command(args):
     except Exception:
         logger.exception(f"Error extracting sequences")
         return 1
+
+    # Tree candidates are deduplicated per subject, so other retained HSPs for
+    # the same subject were not annotated above; classification needs them all.
+    if args.rank != 'no_rank':
+        _annotate_hits_with_taxonomy_if_needed(filtered_hits)
 
     logger.info("Rewriting the blast output file with the new annotations")
     try:
