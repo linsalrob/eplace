@@ -544,26 +544,6 @@ def write_report_row(writer: csv.writer, values: dict[str, str]) -> None:
     ])
 
 
-def write_reference_map_row(writer: csv.writer, values: dict[str, str]) -> None:
-    writer.writerow([
-        values["seq_id"],
-        values["candidate_name"],
-        values["status"],
-        values["assigned_taxid"],
-        values["assigned_rank"],
-        values["assigned_name"],
-        values["hierarchy_match"],
-        values["hierarchy_family"],
-        values["hierarchy_order"],
-        values["hierarchy_class"],
-        values["hierarchy_superclass"],
-        values["custom_label"],
-        values["extraction_method"],
-        values["original_header"],
-        values["new_header"],
-    ])
-
-
 def process_fasta(
     input_fasta: Path,
     output_fasta: Path,
@@ -690,7 +670,7 @@ def process_fasta(
             }
 
             write_report_row(report_writer, values)
-            write_reference_map_row(refmap_writer, values)
+            write_report_row(refmap_writer, values)
 
     print(f"Input records: {total}")
     print(f"Already had taxid: {already_had_taxid}")
