@@ -239,7 +239,45 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-overlap", type=int, default=10)
     parser.add_argument("--max-mismatch", type=int, default=1)
     parser.add_argument("--pool", choices=("false", "pseudo", "true"), default="pseudo")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=(
+            "Remove existing stage directories (01_demultiplexed, 02_trimmed, "
+            "03_dada2, logs/cutadapt) in --output-dir before running. Without "
+            "this, a rerun into a directory with earlier outputs is refused so "
+            "stale samples cannot leak into the new ASV tables."
+        ),
+    )
     return parser
+
+
+STAGE_DIRS = ("01_demultiplexed", "02_trimmed", "03_dada2", "logs/cutadapt")
+
+
+def _prepare_stage_dirs(output_dir: Path, overwrite: bool) -> None:
+    """Refuse to reuse, or clear, stage directories holding earlier outputs.
+
+    DADA2 discovers its inputs by globbing 02_trimmed, so leftover FASTQs from
+    a previous run (a changed sample sheet, an interrupted run) would silently
+    be included in the new ASV tables.
+    """
+    existing = [
+        output_dir / name
+        for name in STAGE_DIRS
+        if (output_dir / name).is_dir() and any((output_dir / name).iterdir())
+    ]
+    if not existing:
+        return
+    if not overwrite:
+        raise ValueError(
+            "Output directory already contains preprocessing outputs ("
+            + ", ".join(str(path) for path in existing)
+            + "). Use a new --output-dir, or pass --overwrite to remove them."
+        )
+    for path in existing:
+        logger.info("Removing earlier outputs in %s", path)
+        shutil.rmtree(path)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -260,6 +298,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         samples = _load_sample_sheet(args.sample_sheet)
         args.output_dir.mkdir(parents=True, exist_ok=True)
+        _prepare_stage_dirs(args.output_dir, args.overwrite)
         demux_dir = demultiplex(args, samples, args.output_dir)
         trimmed_dir = trim_primers(args, samples, demux_dir, args.output_dir)
         run_dada2(args, trimmed_dir, args.output_dir)

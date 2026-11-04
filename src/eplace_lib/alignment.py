@@ -919,11 +919,16 @@ def group_hits_by_group_rank(
         Dictionary mapping group_rank_name (taxonomy name) to another dict mapping
         query_id to list of hits.
         Format: {group_rank_name: {query_id: [hits]}}
+
+        With group_rank 'no_rank' (taxonomy-free custom databases) there is no
+        taxonomy to group by, so all hits form a single 'no_rank' group.
     """
     grouped = defaultdict(lambda: defaultdict(list))
-    
+
     for hit in blast_hits:
-        if hit.subject_taxonomy and group_rank in hit.subject_taxonomy:
+        if group_rank == 'no_rank':
+            grouped['no_rank'][hit.query_id].append(hit)
+        elif hit.subject_taxonomy and group_rank in hit.subject_taxonomy:
             grouped[hit.subject_taxonomy[group_rank][1]][hit.query_id].append(hit)
         else:
             logger.warning(
@@ -1129,31 +1134,16 @@ def trim_grouped_sequences(
                     hit.subject_end
                 )
 
-                # Rename only after trimming, so BLAST-coordinate matching is preserved.
-                taxid = hit.subject_taxid
-                tax_label = hit.subject_id
-
-                if isinstance(hit.subject_taxonomy, dict) and "species" in hit.subject_taxonomy:
-                    taxid, tax_label = hit.subject_taxonomy["species"]
-
-                safe_header = (
-                    f"{taxid}_{tax_label}"
-                    .replace(" ", "_")
-                    .replace(":", "_")
-                    .replace("(", "_")
-                    .replace(")", "_")
-                    .replace(",", "_")
-                    .replace(";", "_")
-                    .replace("|", "_")
-                    .replace("/", "_")
-                )
-
-                out.write(f">{safe_header}\n")
+                # Keep the BLAST accession as the identifier: it is unique per
+                # reference, whereas taxonomic labels repeat within a genus or
+                # species, and tree relabeling and classification map tips back
+                # to hits by accession/subject ID.
+                out.write(f">{accession}\n")
                 for i in range(0, len(trimmed_seq), 60):
                     out.write(trimmed_seq[i:i + 60] + "\n")
 
                 logger.info(
-                    f"Trimmed {accession} as {safe_header} from {len(sequence)} bp "
+                    f"Trimmed {accession} from {len(sequence)} bp "
                     f"to {len(trimmed_seq)} bp (coords: {hit.subject_start}-{hit.subject_end})"
                 )
 

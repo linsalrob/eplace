@@ -1728,6 +1728,18 @@ Notes:
         default=None,
         help='Path to output classification TSV file'
     )
+    search_parser.add_argument(
+        "--output-taxonomy",
+        type=Path,
+        default=None,
+        help=(
+            "Path for the compact analysis-ready taxonomy TSV. "
+            "Defaults to <output-dir>/<query-name>_taxonomy.tsv. "
+            "Only High- and Moderate-confidence classifications are "
+            "reported as formal assignments; Low-confidence results "
+            "remain Unclassified."
+        ),
+    )
     _add_log_level_argument(search_parser)
     
     # Grouped subcommand

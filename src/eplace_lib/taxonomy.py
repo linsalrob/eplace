@@ -1084,13 +1084,80 @@ def _count_unique_taxa(hits: List[BlastHit], rank: str):
     return len(observed)
 
 
+def _make_no_rank_decision(
+    decision: dict,
+    best_hit: BlastHit,
+    competing_hits: List[BlastHit],
+    tree_best_hit: Optional[BlastHit] = None,
+):
+    """
+    Decide on a subject identifier for taxonomy-free (no_rank) databases.
+
+    Without taxonomy there is no LCA to fall back to, so the decision is the
+    best hit's subject ID. Confidence reflects whether other competing subjects
+    or the phylogenetic nearest neighbour point elsewhere.
+    """
+    best_subject = best_hit.subject_id
+    competing_subjects = {hit.subject_id for hit in competing_hits}
+
+    decision["decision_rank"] = "no_rank"
+    decision["decision_taxid"] = best_subject
+    decision["decision_name"] = best_subject
+
+    tree_agrees = "N/A"
+    if tree_best_hit:
+        tree_agrees = (
+            "Yes" if _subject_id_matches(tree_best_hit.subject_id, best_subject) else "No"
+        )
+    decision["tree_agrees_with_decision"] = tree_agrees
+
+    reason_parts = [
+        f"The best alignment matched subject {best_subject} with "
+        f"{best_hit.percent_identity:.2f}% identity and "
+        f"{best_hit.query_coverage:.2f}% query coverage (no_rank mode: "
+        f"no taxonomy is available, so the subject identifier is reported)."
+    ]
+
+    if len(competing_subjects) > 1:
+        reason_parts.append(
+            f"{len(competing_subjects)} distinct subjects were competing matches."
+        )
+
+    if tree_agrees == "Yes":
+        reason_parts.append("The phylogenetic nearest neighbour is the same subject.")
+    elif tree_agrees == "No":
+        reason_parts.append(
+            f"The phylogenetic nearest neighbour was {tree_best_hit.subject_id}, "
+            f"which differs from the best BLAST subject."
+        )
+    else:
+        reason_parts.append("No phylogenetic nearest-neighbour support was available.")
+
+    decision["decision_reason"] = " ".join(reason_parts)
+
+    if tree_agrees == "No":
+        decision["decision_confidence"] = "Low"
+    elif len(competing_subjects) == 1:
+        decision["decision_confidence"] = "High"
+    elif tree_agrees == "Yes":
+        decision["decision_confidence"] = "Moderate"
+    else:
+        decision["decision_confidence"] = "Low"
+
+    return decision
+
+
 def make_decision_classification(
     query_hits: List[BlastHit],
     tree_best_hit: Optional[BlastHit] = None,
+    rank: Optional[str] = None,
 ):
     """
     Create a decision-level classification using competing BLAST hits,
     LCA logic, identity thresholds, and tree agreement.
+
+    When ``rank`` is ``no_rank`` the decision is the best subject identifier
+    rather than a taxon (see ``_make_no_rank_decision``).
     """
     decision = {
         "best_percent_identity": "N/A",
@@ -1140,6 +1207,9 @@ def make_decision_classification(
     decision["competing_species_count"] = _count_unique_taxa(competing_hits, "species")
     decision["competing_genus_count"] = _count_unique_taxa(competing_hits, "genus")
     decision["competing_family_count"] = _count_unique_taxa(competing_hits, "family")
+
+    if rank == "no_rank":
+        return _make_no_rank_decision(decision, best_hit, competing_hits, tree_best_hit)
 
     lca_rank, lca_taxid, lca_name = _find_lca_rank(competing_hits)
 
@@ -1753,6 +1823,7 @@ def generate_classification_summary(
         decision = make_decision_classification(
             query_hits=query_hits,
             tree_best_hit=tree_best_hit,
+            rank=rank,
         )
 
         classification.update(decision)

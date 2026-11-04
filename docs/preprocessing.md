@@ -66,6 +66,8 @@ eplace-preprocess \
 
 Set both truncation lengths to `0` to disable fixed-length truncation and retain only DADA2 expected-error, `truncQ` and minimum-length filtering.
 
+Use a new `--output-dir` for each run. If the directory already contains outputs from an earlier run, `eplace-preprocess` stops rather than mixing old samples into the new ASV tables; pass `--overwrite` to remove the earlier `01_demultiplexed/`, `02_trimmed/`, `03_dada2/` and `logs/cutadapt/` directories first.
+
 ## Main outputs
 
 The final files are written under `03_dada2/`:
