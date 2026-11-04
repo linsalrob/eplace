@@ -1199,7 +1199,7 @@ class TestGenerateClassificationSummary:
             assert 'N/A' in data3[col_idx['blast_classification_name']]
             assert 'N/A' in data3[col_idx['blast_group_name']]
             assert 'N/A' in data3[col_idx['blast_tree_label_name']]
-            assert data3[col_idx['taxonomy_blast']] == ';;;;;'
+            assert data3[col_idx['taxonomy_blast']] == ';;;;;;'
             assert data3[col_idx['tree_based_classification']] == 'No'
             assert data3[col_idx['appears_in_multiple_groups']] == 'No'
             assert data3[col_idx['has_classification']] == 'No'
