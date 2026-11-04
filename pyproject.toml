@@ -38,6 +38,7 @@ docs = [
 
 [project.scripts]
 eplace = "eplace_lib.cli:main"
+eplace-preprocess = "eplace_lib.preprocess:main"
 
 [project.urls]
 Homepage = "https://github.com/linsalrob/eplace"
@@ -48,4 +49,4 @@ Issues = "https://github.com/linsalrob/eplace/issues"
 where = ["src"]
 
 [tool.setuptools.package-data]
-eplace_lib = ["*.txt", "*.md"]
+eplace_lib = ["*.txt", "*.md", "*.R"]
