@@ -753,11 +753,17 @@ def _find_query_sister_tip_labels(tree_file: Path, query_id: str):
     search_label = query_id if query_id in tree_text else query_label
     query_pos = tree_text.find(search_label)
 
-    # Walk left to find the nearest opening parenthesis that contains the query.
+    # Walk left to find the nearest opening parenthesis that contains the query,
+    # skipping over any sibling subtrees that have already closed.
     left = query_pos
+    depth = 0
     while left >= 0:
-        if tree_text[left] == "(":
-            break
+        if tree_text[left] == ")":
+            depth += 1
+        elif tree_text[left] == "(":
+            if depth == 0:
+                break
+            depth -= 1
         left -= 1
 
     if left < 0:

@@ -54,7 +54,8 @@ filter_args <- list(
   matchIDs = TRUE,
   verbose = TRUE
 )
-if (all(trunc_len > 0)) filter_args$truncLen <- trunc_len
+# A zero length leaves that direction untruncated, so pass both whenever either is set.
+if (any(trunc_len > 0)) filter_args$truncLen <- trunc_len
 out <- do.call(filterAndTrim, filter_args)
 write.table(cbind(sample_id = rownames(out), out), file.path(output_dir, "filtering_summary.tsv"),
             sep = "\t", quote = FALSE, row.names = FALSE)
